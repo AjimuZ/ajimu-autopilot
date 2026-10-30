@@ -54,7 +54,7 @@ one of `limits.preflight_max_rounds` (default 3); after the last, the task is bl
 - A correction that adds a cycle or an unknown dependency is refused.
 - The original text and each change with its reason are kept in
   `.ajimu-autopilot/tasks/<ID>.json`, so corrections survive into later sessions and stay
-  traceable to the requirement.
+  traceable to the requirement on this machine; that folder is not in Git.
 
 ## The gate
 

@@ -26,7 +26,7 @@ SECRETS = (
 BAD_PATHS = re.compile(
     r'(?:^|/)(?:\.env(?:\.[^/]*)?|id_rsa|id_ed25519|credentials(?:\.json)?|\.netrc|settings\.local\.json)$'
     r'|\.(?:pem|p12|pfx|key|jsonl|log)$'
-    r'|(?:^|/)(?:\.ajimu-autopilot/runtime|\.claude|node_modules|__pycache__)/',
+    r'|(?:^|/)(?:\.ajimu-autopilot|\.claude|node_modules|__pycache__)/',
     re.IGNORECASE)
 # Documentation that names patterns on purpose, plus the scanners' own pattern tables.
 OWN_PATTERN_FILES = {'tools/audit_publication.py', 'skills/ajimu-autopilot/scripts/autopilot_core/quality.py',

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.0 - 2026-10-30
+
+### Changed
+
+- `.ajimu-autopilot/` no longer reaches Git. Setup and the runner add it to the project's
+  `.gitignore`, and the runner commits that rule on its own. Configuration and task records are
+  now local to each clone, which configures itself with `setup`.
+- A project from an earlier release stops tracking the folder on its next run, in one commit
+  that keeps the files on disk. Other clones lose their copies when they pull it.
+
+### Added
+
+- `validate` reports whether the folder is outside Git.
+
+### Fixed
+
+- A project that already ignored the folder by hand no longer stops when publishing plan changes.
+
 ## 1.1.0 - 2026-10-30
 
 ### Changed

@@ -7,7 +7,12 @@ import re
 import subprocess
 from pathlib import Path
 
-OWNED_PREFIXES = ('scripts/ralph/', '.ajimu-autopilot/')
+METADATA_DIR = '.ajimu-autopilot'
+IGNORE_RULE = f'{METADATA_DIR}/'
+PLAN_DIR = 'scripts/ralph'
+OWNED_PREFIXES = (f'{PLAN_DIR}/', IGNORE_RULE)
+# The rule as a person may have written it by hand; `.ajimu-autopilot/runtime/` is not it.
+IGNORE_LINE = re.compile(rf'/?{re.escape(METADATA_DIR)}(/\*{{0,2}})?\s*\Z')
 SAFE_BRANCH = re.compile(r'[A-Za-z0-9][A-Za-z0-9._/-]*\Z')
 
 
@@ -72,11 +77,34 @@ class Git:
         return path.replace('\\', '/').startswith(OWNED_PREFIXES)
 
     def foreign_changes(self):
-        """Return changed paths outside the orchestrator's own files."""
-        return [path for _, path in self.status_entries() if not self.is_owned(path)]
+        """Return changed paths outside the orchestrator's own files and its own ignore rule."""
+        return [path for _, path in self.status_entries()
+                if not self.is_owned(path) and not (path == '.gitignore' and self.ignore_rule_pending())]
 
     def owned_changes(self):
         return [path for _, path in self.status_entries() if self.is_owned(path)]
+
+    def metadata_ignored(self):
+        """Tell whether the rules cover the metadata folder, even where its files are still tracked."""
+        return self.ok('check-ignore', '--quiet', '--no-index', f'{METADATA_DIR}/config.json')
+
+    def tracked_metadata(self):
+        """Return metadata files Git still tracks, as earlier releases committed them."""
+        return self.run('ls-files', '--', METADATA_DIR).splitlines()
+
+    def ignore_rule_pending(self):
+        """Tell whether `.gitignore` differs from HEAD by nothing but the metadata rule.
+
+        Any other uncommitted edit makes this False, so the owner's own work in that file
+        is never committed by the runner and still counts as a foreign change.
+        """
+        try:
+            current = (Path(self.root) / '.gitignore').read_text(encoding='utf-8', errors='replace').splitlines()
+        except OSError:
+            return False
+        committed = self.run('show', 'HEAD:.gitignore', check=False).splitlines()
+        added = [line for line in current if IGNORE_LINE.match(line) and line not in committed]
+        return bool(added) and [line for line in current if line not in added] == committed
 
     def ensure_branch(self, name, remote, protected):
         """Move to the working branch, creating it when absent.
@@ -160,9 +188,16 @@ class Git:
         self.run('add', '--all')
 
     def stage_owned(self):
-        for prefix in OWNED_PREFIXES:
-            if (Path(self.root) / prefix).exists():
-                self.run('add', '--all', '--', prefix.rstrip('/'))
+        """Stage the plan files. The metadata folder is ignored, and Git refuses to add it by name."""
+        if (Path(self.root) / PLAN_DIR).exists():
+            self.run('add', '--all', '--', PLAN_DIR)
+
+    def stage_metadata_removal(self):
+        """Stage the pending ignore rule and stop tracking metadata; the files stay on disk."""
+        if self.ignore_rule_pending():
+            self.run('add', '--', '.gitignore')
+        if self.tracked_metadata():
+            self.run('rm', '-r', '--cached', '--quiet', '--', METADATA_DIR)
 
     def staged_files(self):
         return [path for path in self.run('diff', '--cached', '--name-only', '-z').split('\0') if path]
@@ -186,8 +221,10 @@ class Git:
         if not self.foreign_changes():
             return None
         self.unstage_all()
+        # Git refuses an ignored path by name, even as an exclusion, so an untracked metadata folder is left out.
+        excluded = [PLAN_DIR] + ([METADATA_DIR] if self.tracked_metadata() else [])
         self.run('stash', 'push', '--include-untracked', '--message', f'ajimu-autopilot: {label}', '--', '.',
-                 *[f':(exclude){prefix.rstrip("/")}' for prefix in OWNED_PREFIXES])
+                 *[f':(exclude){path}' for path in excluded])
         sha = self.run('rev-parse', 'stash@{0}')
         safe_label = re.sub(r'[^A-Za-z0-9._-]+', '-', label).strip('-')
         self.run('update-ref', f'refs/ajimu-autopilot/preserved/{safe_label}', sha)

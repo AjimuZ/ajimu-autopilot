@@ -189,6 +189,7 @@ class Runner:
                                    'then start again:\n- ' + '\n- '.join(foreign[:20]))
         self.git.ensure_branch(git_config['branch'], git_config['remote'], git_config['protected_branches'])
         self.reconcile_remote()
+        self.publish_metadata_removal()
         if not interrupted:
             self.checkpoint('Record autonomous plan updates')
         self.load_capabilities()
@@ -215,6 +216,20 @@ class Runner:
             raise Halt(EXIT_ERROR, f'{branch} is behind {remote}/{branch}. Update it by hand, then resume')
         else:
             raise Halt(EXIT_ERROR, f'{branch} has diverged from {remote}/{branch}. Resolve it by hand, then resume')
+
+    def publish_metadata_removal(self):
+        """Commit and push the ignore rule and the untracking of old metadata, on their own.
+
+        Projects from earlier releases have the folder in Git, and a rule alone does not
+        untrack anything. The local files stay. Other clones lose their copies when they
+        pull this commit, so they need `setup` again.
+        """
+        tracked = self.git.tracked_metadata()
+        if not tracked and not self.git.ignore_rule_pending():
+            return
+        self.git.unstage_all()
+        self.git.stage_metadata_removal()
+        self.commit_and_publish('Stop tracking Autopilot metadata' if tracked else 'Ignore Autopilot metadata')
 
     def recover_states(self):
         """Return True when a task was interrupted mid-flight and may own working-tree changes.
@@ -799,14 +814,18 @@ class Runner:
         """
         if not self.git.owned_changes():
             return None
-        message = subject + '\n'
-        accepted, detail = self.check_message(message)
-        if not accepted:
-            raise Halt(EXIT_ERROR, f'internal commit message rejected: {detail}')
         self.git.unstage_all()
         self.git.stage_owned()
         if not self.git.staged_files():
             return None
+        return self.commit_and_publish(subject, task_id)
+
+    def commit_and_publish(self, subject, task_id=None):
+        """Commit the index under a validated subject and push it; return the commit."""
+        message = subject + '\n'
+        accepted, detail = self.check_message(message)
+        if not accepted:
+            raise Halt(EXIT_ERROR, f'internal commit message rejected: {detail}')
         try:
             commit = self.git.commit(self.project.runtime_dir / 'COMMIT_MSG')
             git_config = self.config['git']

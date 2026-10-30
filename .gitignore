@@ -6,4 +6,4 @@ dist/
 .env
 .env.*
 !.env.example
-.ajimu-autopilot/runtime/
+.ajimu-autopilot/

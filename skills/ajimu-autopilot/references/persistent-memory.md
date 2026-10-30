@@ -6,11 +6,19 @@
 | --- | --- | --- |
 | `scripts/ralph/prd.json` | Yes | Tasks and completion |
 | `scripts/ralph/progress.txt` | Yes | Codebase patterns and one entry per finished task |
-| `.ajimu-autopilot/config.json` | Yes | Limits, checks, routing overrides, permissions |
-| `.ajimu-autopilot/tasks/<ID>.json` | Yes | Original text, corrections, latest preflight, executions, blockers |
+| `.ajimu-autopilot/config.json` | No | Limits, checks, routing overrides, permissions |
+| `.ajimu-autopilot/tasks/<ID>.json` | No | Original text, corrections, latest preflight, executions, blockers |
 | `CLAUDE.md` | Yes | Stable project conventions, updated by sessions when useful |
 | Roadmap, changelog, docs, ADRs | Yes | Requirements and decisions |
-| `.ajimu-autopilot/runtime/` | No (self-ignoring) | Live state, lock, stop flag, session logs, errors, model probe |
+| `.ajimu-autopilot/runtime/` | No | Live state, lock, stop flag, session logs, errors, model probe |
+
+The whole `.ajimu-autopilot/` folder stays local. Setup and the runner add it to the project's
+`.gitignore`, and a rule the owner already wrote in another form is respected. The runner
+commits that rule on its own at the start of a run. If the owner has other uncommitted edits
+to `.gitignore`, the run stops as for any other uncommitted change.
+
+A project from an earlier release has the folder in Git: the next run stops tracking it in one
+commit and leaves the files on disk. Other clones lose their copies when they pull that commit.
 
 Session transcripts are never committed. Stream logs stay in `runtime/logs/` and only the
 latest `limits.keep_session_logs` (default 40) are kept.
@@ -39,9 +47,13 @@ Start the runner again with `resume`. A lock left by a dead process is reclaimed
 | `committing` | A commit with this task's exact `Task:` line is adopted; otherwise the stored message is used |
 | `pushing` | Compared with the remote; pushed only if missing |
 
-If the runtime folder is lost, `prd.json` still decides what is complete, and local commits
-missing from the remote are published on the next start. Being behind or diverged from the
-remote stops the run for a person to resolve.
+If the folder is lost, `prd.json` still decides what is complete, and local commits missing
+from the remote are published on the next start. Being behind or diverged from the remote
+stops the run for a person to resolve.
+
+A fresh clone has no `.ajimu-autopilot/`. Run `setup` there and set the project's checks and any
+other configuration again: they do not travel with the repository. Task records do not either,
+so open tasks get a new preflight, and correction history stays on the machine that made it.
 
 An interrupted attempt keeps its attempt count. A stop request or a usage limit gives the
 attempt back, because neither says anything about the work.

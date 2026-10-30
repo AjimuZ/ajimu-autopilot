@@ -193,18 +193,24 @@ because Claude Code does not report it, so records store the level sent and
 | --- | --- |
 | `scripts/ralph/prd.json` | Tasks and completion |
 | `scripts/ralph/progress.txt` | Codebase patterns and one entry per finished task |
-| `.ajimu-autopilot/tasks/<ID>.json` | Original text, corrections, preflight, executions, blockers |
-| `.ajimu-autopilot/config.json` | Limits, checks, routing, permissions |
-| `.ajimu-autopilot/runtime/` | Live state, lock, logs (never committed) |
+| `.ajimu-autopilot/tasks/<ID>.json` | Original text, corrections, preflight, executions, blockers (local) |
+| `.ajimu-autopilot/config.json` | Limits, checks, routing, permissions (local) |
+| `.ajimu-autopilot/runtime/` | Live state, lock, logs (local) |
 | `CLAUDE.md`, roadmap, docs, ADRs | Stable conventions, requirements and decisions |
 
 Each new session receives the task, the preflight conclusions, earlier findings, and a bounded
 slice of progress. Transcripts are never committed.
 
+**`.ajimu-autopilot/` never reaches Git.** Setup and the runner add it to the project's
+`.gitignore`, and the runner commits that rule on its own. In a project from an earlier release,
+the next run stops tracking the folder and keeps the files on disk. A fresh clone has no such
+folder, so run `setup` there and set its checks and configuration again; the plan and task
+completion do travel, in `scripts/ralph/`.
+
 ## Commit and push
 
 The runner alone commits and pushes; sessions are denied those commands. Each task gets one
-commit with code, tests, documentation and metadata, then a push confirmed with `git ls-remote`.
+commit with code, tests, documentation and the plan update, then a push confirmed with `git ls-remote`.
 There is no force push, rebase, `--no-verify` or deployment.
 
 **The default working branch is `main`.** Commits go there directly, with no pull request or

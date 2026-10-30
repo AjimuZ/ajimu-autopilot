@@ -53,9 +53,9 @@ class RunnerTests(Sandbox):
         self.assertNotIn('Co-Authored-By', message)
         self.assertEqual('Test Owner <owner@example.invalid>', self.git('log', '-1', '--format=%an <%ae>'))
         changed = self.git('show', '--name-only', '--format=', 'HEAD').splitlines()
-        for path in ('app.txt', 'scripts/ralph/prd.json', 'scripts/ralph/progress.txt', '.ajimu-autopilot/tasks/T-1.json'):
+        for path in ('app.txt', 'scripts/ralph/prd.json', 'scripts/ralph/progress.txt'):
             self.assertIn(path, changed)
-        self.assertFalse([path for path in changed if 'runtime' in path])
+        self.assertFalse([path for path in changed if '.ajimu-autopilot' in path])
 
     def test_each_session_is_a_new_process_with_selected_model_and_effort(self):
         self.layout = self.make_repository([self.story()])
@@ -682,6 +682,59 @@ class RunnerTests(Sandbox):
         self.assertEqual(0, self.runner().run(), self.lines)
         self.assertEqual(launches, len(self.launches()))
 
+    def test_metadata_folder_never_reaches_git(self):
+        self.layout = self.make_repository([self.story()])
+        self.scenario(**self.happy())
+        self.assertEqual(0, self.runner().run(), self.lines)
+        self.assertEqual('', self.git('ls-files', '.ajimu-autopilot'))
+        self.assertEqual('', self.git('ls-tree', '-r', '--name-only', 'autopilot/roadmap', '.ajimu-autopilot', cwd=self.remote))
+        self.assertIn('.ajimu-autopilot/', self.git('show', 'autopilot/roadmap:.gitignore', cwd=self.remote).splitlines())
+        self.assertIn('Ignore Autopilot metadata', self.remote_log())
+        self.assertTrue(self.layout.record_path('T-1').is_file(), 'the record stays on disk')
+        self.assertEqual('', self.git('status', '--porcelain'))
+
+    def test_metadata_tracked_by_an_earlier_release_is_untracked_and_kept(self):
+        self.layout = self.make_repository([self.story()], branch=None)
+        (self.project / '.gitignore').unlink()
+        self.git('add', '--all')
+        self.git('commit', '--quiet', '-m', 'Record the plan as an earlier release did')
+        self.git('push', '--quiet', 'origin', 'main')
+        self.assertTrue(self.git('ls-files', '.ajimu-autopilot'))
+        self.scenario(**self.happy())
+        self.assertEqual(0, self.runner().run(), self.lines)
+        self.assertEqual('', self.git('ls-files', '.ajimu-autopilot'))
+        self.assertTrue(self.layout.config_path.is_file(), 'local configuration survives')
+        self.assertEqual('', self.git('ls-tree', '-r', '--name-only', 'main', '.ajimu-autopilot', cwd=self.remote))
+        self.assertIn('Stop tracking Autopilot metadata', self.remote_log('main'))
+
+    def test_hand_written_ignore_rule_is_respected_and_not_duplicated(self):
+        self.layout = self.make_repository([self.story()])
+        (self.project / '.gitignore').write_text('build/\n.ajimu-autopilot/*\n', encoding='utf-8', newline='\n')
+        self.git('add', '--all')
+        self.git('commit', '--quiet', '-m', 'Ignore the folder by hand')
+        self.scenario(**self.happy())
+        self.assertEqual(0, self.runner().run(), self.lines)
+        self.assertEqual('build/\n.ajimu-autopilot/*\n', (self.project / '.gitignore').read_text(encoding='utf-8'))
+        self.assertEqual('', self.git('ls-files', '.ajimu-autopilot'))
+
+    def test_owner_edit_to_gitignore_stops_the_run_uncommitted(self):
+        self.layout = self.make_repository([self.story()])
+        with open(self.project / '.gitignore', 'a', encoding='utf-8') as handle:
+            handle.write('my-own-rule/\n')
+        self.assertEqual(runner_module.EXIT_ERROR, self.runner().run())
+        self.assertIn('uncommitted changes', self.lines[-1])
+        self.assertIn('.gitignore', self.lines[-1])
+        self.assertEqual([], self.launches())
+
+    def test_ignore_rule_keeps_existing_content_and_line_endings(self):
+        from autopilot_core import project as project_module
+        self.layout = self.make_repository([self.story()])
+        path = self.project / '.gitignore'
+        path.write_bytes(b'build/\r\nno-newline')
+        self.assertTrue(project_module.Project(self.project).ensure_runtime())
+        self.assertEqual(b'build/\r\nno-newline\r\n.ajimu-autopilot/\r\n', path.read_bytes())
+        self.assertFalse(project_module.Project(self.project).ensure_runtime())
+
     def test_fresh_clone_never_commits_runtime_files(self):
         self.layout = self.make_repository([self.story(), self.story('T-2', priority=2)])
         self.scenario(preflight=[{'structured': ready_preflight('T-1')}],
@@ -692,14 +745,18 @@ class RunnerTests(Sandbox):
         self.git('clone', '--quiet', '-b', 'autopilot/roadmap', str(self.remote), str(clone), cwd=self.tmp)
         self.git('config', 'user.name', 'Test Owner', cwd=clone)
         self.git('config', 'user.email', 'owner@example.invalid', cwd=clone)
-        self.assertFalse((clone / '.ajimu-autopilot/runtime').exists())
+        self.assertFalse((clone / '.ajimu-autopilot').exists(), 'the folder does not travel through Git')
+        # A clone is configured again by setup; plan and completion come from prd.json.
+        from autopilot_core import project as project_module
+        project_module.setup(clone, branch='autopilot/roadmap')
+        write_json_atomic(clone / '.ajimu-autopilot/config.json', self.layout.config())
         self.scenario(preflight=[{'structured': ready_preflight('T-2')}],
                       implementation=[{'edits': {str(clone / 'two.txt'): 'x\n'}, 'structured': done_output('Add the second file')}],
                       review=[{'structured': review_pass()}])
         worker = runner_module.Runner(clone, output=self.lines.append)
         self.assertEqual(0, worker.run(), self.lines)
         tracked = self.git('ls-files', cwd=clone)
-        self.assertNotIn('runtime', tracked)
+        self.assertNotIn('.ajimu-autopilot', tracked)
         self.assertEqual(1, self.git('log', '--format=%s', cwd=clone).splitlines().count('Add greeting output'))
         self.assertEqual(2, len(self.launches('implementation')), 'the finished task was not repeated')
 

@@ -1,7 +1,8 @@
 """Per-project layout, configuration and the idempotent setup step.
 
-Setup only writes orchestration files. It never commits, never changes branches and
-never starts development. Existing plans and settings are kept and only completed.
+Setup only writes orchestration files and the ignore rule for its own folder. It never
+commits, never changes branches and never starts development. Existing plans and settings
+are kept and only completed.
 """
 import copy
 import json
@@ -9,9 +10,9 @@ import re
 import shlex
 from pathlib import Path
 
+from . import gitops, roadmap, routing
 from . import prd as prd_module
-from . import roadmap, routing
-from .store import read_json, write_json_atomic, write_text_atomic
+from .store import read_json, write_bytes_atomic, write_json_atomic, write_text_atomic
 
 PROGRESS_HEADER = '# Ralph Progress Log\n\n## Codebase Patterns\n\n---\n'
 DEFAULT_CONFIG = {
@@ -50,7 +51,7 @@ class Project:
         self.ralph_dir = self.root / 'scripts' / 'ralph'
         self.prd_path = self.ralph_dir / 'prd.json'
         self.progress_path = self.ralph_dir / 'progress.txt'
-        self.meta_dir = self.root / '.ajimu-autopilot'
+        self.meta_dir = self.root / gitops.METADATA_DIR
         self.config_path = self.meta_dir / 'config.json'
         self.tasks_dir = self.meta_dir / 'tasks'
         self.runtime_dir = self.meta_dir / 'runtime'
@@ -65,15 +66,22 @@ class Project:
         return self.config_path.is_file() and self.prd_path.is_file()
 
     def ensure_runtime(self):
-        """Make the runtime folder ignore itself, before anything is written into it.
+        """Create the runtime folder and keep the metadata folder out of Git.
 
-        The ignore file cannot travel through Git, because it ignores itself. A fresh clone
-        has none, and without this its state, logs and lock would be committed as plan files.
+        Returns True when the project's `.gitignore` gained the rule. Git decides whether a
+        rule already applies, so one the owner wrote in another form is left alone. The
+        file's other bytes and line endings are preserved. Outside a repository Git cannot
+        answer, so the file itself is what keeps this idempotent.
         """
-        ignore = self.runtime_dir / '.gitignore'
-        if ignore.is_file():
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        path = self.root / '.gitignore'
+        content = path.read_bytes() if path.is_file() else b''
+        rule = gitops.IGNORE_RULE.encode()
+        if gitops.Git(self.root).metadata_ignored() or rule in content.splitlines():
             return False
-        write_text_atomic(ignore, '*\n')
+        newline = b'\r\n' if b'\r\n' in content else b'\n'
+        separator = newline if content and not content.endswith(b'\n') else b''
+        write_bytes_atomic(path, content + separator + rule + newline)
         return True
 
     def config(self):
@@ -266,9 +274,8 @@ def setup(root, roadmap_path=None, branch=None, remote=None):
     if not project.progress_path.is_file():
         write_text_atomic(project.progress_path, PROGRESS_HEADER)
         report['created'].append('scripts/ralph/progress.txt')
-    # A self-ignoring folder avoids editing the owner's root .gitignore.
     if project.ensure_runtime():
-        report['created'].append('.ajimu-autopilot/runtime/.gitignore')
+        report['updated'].append('.gitignore')
     project.tasks_dir.mkdir(parents=True, exist_ok=True)
     return report
 

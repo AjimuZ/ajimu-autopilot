@@ -75,9 +75,10 @@ it costs a few cents, so offer it instead of running it unasked.
 ## 7. Report
 
 Show the task count, blockers, open questions and uncertain findings, then these
-commands, which work from any terminal. The runner commits the setup files itself, on
-the working branch (`main` unless `git.branch` says otherwise), at the start of the first
-run. Say plainly that commits and pushes go directly to that branch.
+commands, which work from any terminal. The runner commits `scripts/ralph/` and the
+`.gitignore` rule itself, on the working branch (`main` unless `git.branch` says otherwise),
+at the start of the first run. `.ajimu-autopilot/` is ignored and stays on this machine. Say
+plainly that commits and pushes go directly to that branch.
 
 ```bash
 python "<skill folder>/scripts/autopilot.py" validate --live    # optional probe

@@ -34,9 +34,9 @@ commits on it go out too, at the start of the run.
 A commit refused by a hook returns the task to `ready` with the hook's output, and the
 changes stay in the working tree. `--no-verify` does not exist in this code.
 
-Plan-only changes (a block, a split, plan edits) go in separate commits touching only the
-orchestration files. They have no `Task:` line, so a recovery can never mistake them for
-delivered work.
+Plan-only changes (a block, a split, plan edits) go in separate commits touching only
+`scripts/ralph/`. They have no `Task:` line, so a recovery can never mistake them for delivered
+work. The `.ajimu-autopilot/` folder is never committed.
 
 ## Committed versus published
 

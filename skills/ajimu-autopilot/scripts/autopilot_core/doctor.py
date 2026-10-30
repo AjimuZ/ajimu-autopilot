@@ -149,6 +149,11 @@ def run(root, live=False, environ=None):
             report.add('remote access', False, str(error))
         foreign = git.foreign_changes()
         report.add('clean working tree', not foreign, ', '.join(foreign[:10]) or 'clean')
+        tracked = git.tracked_metadata()
+        report.add('metadata outside Git', git.metadata_ignored() and not tracked,
+                   f'the next run stops tracking {len(tracked)} files; they stay on disk, and other clones need setup again'
+                   if tracked else f'{gitops.IGNORE_RULE} is ignored' if git.metadata_ignored()
+                   else f'the next run adds {gitops.IGNORE_RULE} to .gitignore', blocking=False)
     if live and command and found:
         live_probes(project, config, command, report, environ)
     return report

@@ -8,7 +8,7 @@ script, so the additive fields below are compatible.
 ```json
 {
   "project": "MyApp",
-  "branchName": "autopilot/roadmap",
+  "branchName": "main",
   "description": "What this plan delivers",
   "userStories": [
     {

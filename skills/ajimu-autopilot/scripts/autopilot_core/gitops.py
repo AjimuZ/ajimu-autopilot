@@ -78,15 +78,8 @@ class Git:
     def owned_changes(self):
         return [path for _, path in self.status_entries() if self.is_owned(path)]
 
-    def protected_branches(self, remote, configured):
-        protected = set(configured)
-        default = self.run('symbolic-ref', '--quiet', '--short', f'refs/remotes/{remote}/HEAD', check=False)
-        if default:
-            protected.add(default.split('/', 1)[-1])
-        return protected
-
-    def ensure_branch(self, name, remote, configured_protected):
-        """Move to the dedicated branch, creating it when absent.
+    def ensure_branch(self, name, remote, protected):
+        """Move to the working branch, creating it when absent.
 
         Refuses a switch while project files have uncommitted changes, because they could
         mix into another line. Orchestration files may travel, and Git itself refuses a
@@ -94,8 +87,8 @@ class Git:
         """
         if not SAFE_BRANCH.match(name):
             raise GitError(f'unsafe branch name: {name!r}')
-        if name in self.protected_branches(remote, configured_protected):
-            raise GitError(f'{name} is protected; autonomous work needs a dedicated branch')
+        if name in protected:
+            raise GitError(f'{name} is listed in git.protected_branches; choose another branch or remove it from that list')
         if self.branch() == name:
             return False
         if self.foreign_changes():

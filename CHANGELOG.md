@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.0 - 2026-10-30
+
+### Changed
+
+- New projects now work on `main` by default: each task is committed and pushed there directly.
+  `setup --branch NAME` selects another branch, and projects already configured keep theirs.
+- `main`, `master` and the remote's default branch are no longer refused automatically. Only
+  branches listed in `git.protected_branches`, empty by default, are refused.
+
+### Added
+
+- `validate` warns when the working branch does not exist yet and the first run would create it.
+
 ## 1.0.0 - 2026-10-30
 
 First public release.

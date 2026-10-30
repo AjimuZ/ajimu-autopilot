@@ -1,6 +1,6 @@
 ---
 name: ajimu-autopilot
-description: Configures a software repository for autonomous, roadmap-driven development - analyses the project, turns its roadmap into verifiable Ralph tasks, and prepares a runner where every task passes a mandatory preflight, runs in a fresh Claude Code session on an automatically selected Sonnet or Opus model and effort, applies Ajimu Conventions, and is committed and pushed to a dedicated branch. Use when the user invokes /ajimu-autopilot to set up or update autonomous development for a project.
+description: Configures a software repository for autonomous, roadmap-driven development - analyses the project, turns its roadmap into verifiable Ralph tasks, and prepares a runner where every task passes a mandatory preflight, runs in a fresh Claude Code session on an automatically selected Sonnet or Opus model and effort, applies Ajimu Conventions, and is committed and pushed, on the main branch by default. Use when the user invokes /ajimu-autopilot to set up or update autonomous development for a project.
 disable-model-invocation: true
 argument-hint: "[roadmap path]"
 ---
@@ -76,7 +76,8 @@ it costs a few cents, so offer it instead of running it unasked.
 
 Show the task count, blockers, open questions and uncertain findings, then these
 commands, which work from any terminal. The runner commits the setup files itself, on
-the dedicated branch, at the start of the first run.
+the working branch (`main` unless `git.branch` says otherwise), at the start of the first
+run. Say plainly that commits and pushes go directly to that branch.
 
 ```bash
 python "<skill folder>/scripts/autopilot.py" validate --live    # optional probe

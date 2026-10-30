@@ -138,10 +138,13 @@ def run(root, live=False, environ=None):
     if is_repo:
         name, email = git.identity()
         report.add('Git identity', bool(name and email), f'{name} <{email}>' if name else 'not configured')
-        protected = git.protected_branches(git_config['remote'], git_config['protected_branches'])
-        report.add('dedicated branch', git_config['branch'] not in protected, git_config['branch'])
+        report.add('working branch', git_config['branch'] not in git_config['protected_branches'], git_config['branch'])
         try:
             report.add('remote access', bool(git.remote_url(git_config['remote'])), _remote_detail(git, git_config))
+            # A repository whose main line has another name would silently gain a second one.
+            if not git.branch_exists(git_config['branch']) and not git.remote_head(git_config['remote'], git_config['branch']):
+                report.add('working branch exists', False, f'{git_config["branch"]} does not exist; the first run creates it '
+                           'from the current commit. Use "setup --branch NAME" if the project uses another name', False)
         except gitops.GitError as error:
             report.add('remote access', False, str(error))
         foreign = git.foreign_changes()

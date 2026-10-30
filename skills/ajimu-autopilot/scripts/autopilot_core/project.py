@@ -31,7 +31,7 @@ DEFAULT_CONFIG = {
     'preflight': {'model': 'sonnet', 'effort': 'medium'},
     'review': {'enabled': True},
     'routing': {'overrides': {}},
-    'git': {'remote': 'origin', 'branch': 'autopilot/roadmap', 'protected_branches': ['main', 'master']},
+    'git': {'remote': 'origin', 'branch': 'main', 'protected_branches': []},
     'checks': [],
     'docs': {'roadmap': None, 'changelog': None},
     'permissions': {'bash_allow': [], 'extra_allow': [], 'extra_deny': []},

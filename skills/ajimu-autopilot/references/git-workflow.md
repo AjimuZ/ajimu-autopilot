@@ -7,9 +7,17 @@ the run halts with nothing discarded.
 
 ## Branch
 
-Work happens on `git.branch` (default `autopilot/roadmap`), created safely if absent.
-`main`, `master`, the remote's default branch and `git.protected_branches` are refused.
-Nothing merges back automatically: merging is the owner's decision.
+Work happens on `git.branch`, which defaults to `main`: each task's commit is pushed there
+directly, with no pull request and no human review in between. An absent branch is created
+safely from the current commit, and `validate` warns about it first.
+
+To keep autonomous work apart from the main line, set another branch with
+`setup --branch autopilot/roadmap`. Merging it is then the owner's decision. A project
+already configured keeps its branch when setup runs again. Branches listed in
+`git.protected_branches` (empty by default) are refused.
+
+Pushing publishes the whole local history of the branch, so any of the owner's unpushed
+commits on it go out too, at the start of the run.
 
 ## Per task
 
@@ -43,7 +51,7 @@ safe locally and no new task starts. `status` shows the last confirmed push.
 
 ## Never done
 
-Force push, merge into the main branch, rebase, reset of work, deployment, changes to Git
+Force push, merges between branches, rebase, reset of work, deployment, changes to Git
 configuration, or force-adding ignored files.
 
 ## Blocked tasks

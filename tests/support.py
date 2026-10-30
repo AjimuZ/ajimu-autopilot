@@ -79,7 +79,7 @@ class Sandbox(unittest.TestCase):
             raise AssertionError(f'git {args}: {process.stderr}')
         return process.stdout.strip()
 
-    def make_repository(self, stories=None, roadmap=None):
+    def make_repository(self, stories=None, roadmap=None, branch='autopilot/roadmap'):
         """Create the repo, its bare remote and a configured plan with a real passing check."""
         subprocess.run(['git', 'init', '--quiet', '--bare', str(self.remote)], check=True)
         self.project.mkdir()
@@ -99,7 +99,7 @@ class Sandbox(unittest.TestCase):
 
         from autopilot_core import prd, project as project_module
         from autopilot_core.store import write_json_atomic
-        project_module.setup(self.project, 'ROADMAP.md' if roadmap else None)
+        project_module.setup(self.project, 'ROADMAP.md' if roadmap else None, branch)
         layout = project_module.Project(self.project)
         config = layout.config()
         config['checks'] = [{'name': 'test', 'command': f'"{sys.executable}" check.py', 'required': True}]

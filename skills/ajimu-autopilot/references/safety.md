@@ -70,7 +70,15 @@ pauses the run without charging an attempt, and `resume` continues later.
 - `stop` ends the current session safely. A pending stop prevents `run` until `resume`.
 - Errors are appended to `runtime/errors.log`; `status` shows the latest.
 - The change scan blocks likely secrets, sensitive files and disabled or deleted tests. It
-  uses patterns and can miss things, so review the branch before merging.
+  uses patterns and can miss things.
+
+## Working on main
+
+By default, commits reach `main` and are pushed with no human review. On a project where
+pushes to `main` trigger deployment, or where others pull from it, a wrong change that
+passes the checks reaches them directly. Use `setup --branch NAME` or `git.protected_branches`
+for those projects, and rely on server-side branch protection where you have it: a rejected
+push stops the run with the commit kept locally.
 
 ## If permissions are not enough
 

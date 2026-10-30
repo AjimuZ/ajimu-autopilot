@@ -7,8 +7,8 @@ and resumable development process.
 it, one task at a time, in fresh Claude Code sessions. Before any implementation, each task
 passes a mandatory preflight that can correct it, split it, block it or find it already done.
 The preflight also chooses the model and effort, with **Sonnet as the enforced minimum**. Each
-finished task is checked by the runner itself, reviewed, documented, committed and pushed to a
-dedicated branch.
+finished task is checked by the runner itself, reviewed, documented, committed and pushed, on
+`main` by default.
 
 ## Features
 
@@ -204,9 +204,20 @@ slice of progress. Transcripts are never committed.
 ## Commit and push
 
 The runner alone commits and pushes; sessions are denied those commands. Each task gets one
-commit with code, tests, documentation and metadata, on `autopilot/roadmap` by default, then a
-push confirmed with `git ls-remote`. `main` and the remote's default branch are refused, and
-nothing merges automatically. There is no force push, rebase, `--no-verify` or deployment.
+commit with code, tests, documentation and metadata, then a push confirmed with `git ls-remote`.
+There is no force push, rebase, `--no-verify` or deployment.
+
+**The default working branch is `main`.** Commits go there directly, with no pull request or
+human review, and the push also publishes any unpushed commits of yours on that branch. To keep
+autonomous work separate, choose another branch at setup, and merge it when you are ready:
+
+```bash
+python "$HOME/.claude/skills/ajimu-autopilot/scripts/autopilot.py" setup --branch autopilot/roadmap
+```
+
+Projects already configured keep their branch. Branches listed in `git.protected_branches` are
+refused, and `validate` warns if the working branch does not exist yet, as in a project whose
+main line is called `master`.
 
 A failed push keeps the commit and stops new work until `resume` succeeds.
 
@@ -247,7 +258,7 @@ What has actually been run for this release, with Claude Code 2.1.314:
 - **Background model use is not fully observable.** The environment variable is the documented
   control, and it can only be spot-checked through debug logs.
 - **Quality depends on your checks.** With weak tests, a wrong change can pass both checks and
-  review. Review the branch before merging.
+  review, and by default it then reaches `main`. Be careful where pushing to `main` deploys.
 - **The change scan uses patterns.** It can miss secrets and can raise false alarms.
 - **Deny rules are not a sandbox.** Allowed check commands run project code with your permissions.
 - **Tool and vendor names in commit messages are rejected** by the conventions validator, which

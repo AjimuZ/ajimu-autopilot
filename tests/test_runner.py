@@ -488,6 +488,7 @@ class RunnerTests(Sandbox):
         self.layout = self.make_repository([self.story()])
         config = self.layout.config()
         config['git']['branch'] = 'main'
+        config['git']['protected_branches'] = ['main']
         write_json_atomic(self.layout.config_path, config)
         plan = self.plan()
         plan['branchName'] = 'main'
@@ -496,7 +497,7 @@ class RunnerTests(Sandbox):
         self.assertIn('protected', self.lines[-1])
         self.assertEqual([], self.launches())
 
-    def test_main_branch_is_never_touched(self):
+    def test_another_configured_branch_leaves_main_untouched(self):
         self.layout = self.make_repository([self.story()])
         before = self.git('rev-parse', 'main', cwd=self.remote)
         self.scenario(**self.happy())
@@ -746,6 +747,88 @@ class RunnerTests(Sandbox):
         self.scenario(**self.happy())
         self.assertEqual(0, self.runner().run(), self.lines)
         self.assertEqual('completed', self.state()['tasks']['T-1']['status'])
+
+
+@unittest.skipUnless(conventions.locate(), 'ajimu-conventions is not installed')
+class DefaultBranchTests(Sandbox):
+    """The default working branch is main, committed and pushed to directly."""
+
+    def happy(self):
+        return dict(preflight=[{'structured': ready_preflight('T-1')}],
+                    implementation=[{'edits': self.edit(), 'structured': done_output()}],
+                    review=[{'structured': review_pass()}])
+
+    def test_new_project_defaults_to_main_with_nothing_protected(self):
+        layout = self.make_repository([self.story()], branch=None)
+        config = layout.config()
+        self.assertEqual('main', config['git']['branch'])
+        self.assertEqual([], config['git']['protected_branches'])
+        self.assertEqual('main', prd.load(layout.prd_path)['branchName'])
+
+    def test_task_is_committed_and_pushed_on_main(self):
+        self.make_repository([self.story()], branch=None)
+        # The remote's default branch used to be refused automatically; it must not be any more.
+        self.git('fetch', '--quiet', 'origin')
+        self.git('remote', 'set-head', 'origin', 'main')
+        self.scenario(**self.happy())
+        self.assertEqual(0, self.runner().run(), self.lines)
+        self.assertEqual('main', self.git('branch', '--show-current'))
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.git('rev-parse', 'main', cwd=self.remote))
+        self.assertIn('Add greeting output', self.remote_log('main'))
+        self.assertEqual(['main'], self.git('branch', '--format=%(refname:short)').splitlines())
+        self.assertEqual(['main'], self.git('branch', '--format=%(refname:short)', cwd=self.remote).splitlines())
+
+    def test_run_started_elsewhere_moves_to_main(self):
+        self.make_repository([self.story()], branch=None)
+        self.git('switch', '--quiet', '-c', 'feature')
+        self.scenario(**self.happy())
+        self.assertEqual(0, self.runner().run(), self.lines)
+        self.assertEqual('main', self.git('branch', '--show-current'))
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.git('rev-parse', 'main', cwd=self.remote))
+
+    def test_owner_unpushed_commits_on_main_are_published_first(self):
+        self.make_repository([self.story()], branch=None)
+        (self.project / 'mine.txt').write_text('x', encoding='utf-8')
+        self.git('add', 'mine.txt')
+        self.git('commit', '--quiet', '-m', 'Add my own file')
+        self.scenario(**self.happy())
+        self.assertEqual(0, self.runner().run(), self.lines)
+        self.assertIn('Add my own file', self.remote_log('main'))
+
+    def test_main_behind_the_remote_stops_without_merging(self):
+        self.make_repository([self.story()], branch=None)
+        other = self.tmp / 'other'
+        self.git('clone', '--quiet', '-b', 'main', str(self.remote), str(other), cwd=self.tmp)
+        self.git('config', 'user.name', 'Other', cwd=other)
+        self.git('config', 'user.email', 'other@example.invalid', cwd=other)
+        (other / 'other.txt').write_text('x', encoding='utf-8')
+        self.git('add', '--all', cwd=other)
+        self.git('commit', '--quiet', '-m', 'Work elsewhere', cwd=other)
+        self.git('push', '--quiet', 'origin', 'main', cwd=other)
+        remote_before = self.git('rev-parse', 'main', cwd=self.remote)
+        self.assertEqual(runner_module.EXIT_ERROR, self.runner().run())
+        self.assertIn('behind', self.lines[-1])
+        self.assertEqual(remote_before, self.git('rev-parse', 'main', cwd=self.remote))
+        self.assertEqual([], self.launches())
+
+    def test_existing_project_keeps_its_branch(self):
+        from autopilot_core import project as project_module
+        layout = self.make_repository([self.story()], branch='autopilot/roadmap')
+        project_module.setup(self.project)
+        self.assertEqual('autopilot/roadmap', layout.config()['git']['branch'])
+        self.assertEqual('autopilot/roadmap', prd.load(layout.prd_path)['branchName'])
+
+    def test_validate_warns_when_the_branch_would_be_created(self):
+        layout = self.make_repository([self.story()], branch=None)
+        self.git('branch', '-m', 'main', 'master')
+        self.git('push', '--quiet', 'origin', 'master')
+        self.git('symbolic-ref', 'HEAD', 'refs/heads/master', cwd=self.remote)
+        self.git('push', '--quiet', 'origin', '--delete', 'main')
+        result = subprocess.run([sys.executable, str(SCRIPTS / 'autopilot.py'), 'validate', '--project', str(self.project)],
+                                capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stdout)
+        self.assertIn('[warn] working branch exists: main does not exist', result.stdout)
+        self.assertTrue(layout.config_path.is_file())
 
 
 @unittest.skipUnless(conventions.locate(), 'ajimu-conventions is not installed')

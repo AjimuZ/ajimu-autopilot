@@ -200,6 +200,8 @@ class Runner:
         Being behind or diverged needs a person's decision: this runner never merges,
         rebases or forces. Commits that are only local are pushed here, which is also
         what keeps a restart with a lost runtime folder from repeating published work.
+        On a shared branch this publishes the owner's unpushed commits too, as the first
+        task's push would.
         """
         remote, branch = self.config['git']['remote'], self.config['git']['branch']
         remote_sha = self.git.remote_head(remote, branch)
@@ -239,7 +241,7 @@ class Runner:
         self.capabilities = read_json(self.project.capabilities_path) or {}
 
     def prepare_for_single_phase(self):
-        """Load what a standalone preflight needs, on the dedicated branch.
+        """Load what a standalone preflight needs, on the working branch.
 
         The branch matters because a preflight can commit plan changes. Those must never
         land on the branch the owner happened to have checked out.

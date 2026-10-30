@@ -225,7 +225,7 @@ def build_parser():
 
     sub = add('setup', command_setup, 'Create or complete the orchestration files. Never starts development.')
     sub.add_argument('--roadmap', help='roadmap path relative to the project root')
-    sub.add_argument('--branch', help='dedicated branch (default: autopilot/roadmap)')
+    sub.add_argument('--branch', help='working branch (default: main)')
     sub.add_argument('--remote', help='remote name (default: origin)')
     sub.add_argument('--json', action='store_true')
     sub = add('import-roadmap', command_import, 'Add unseen items from a Markdown roadmap to prd.json.')

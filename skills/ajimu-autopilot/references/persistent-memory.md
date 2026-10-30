@@ -41,7 +41,7 @@ Start the runner again with `resume`. A lock left by a dead process is reclaimed
 
 | Stage found | What happens |
 | --- | --- |
-| `preflight` | Restarts; preflights change nothing but metadata |
+| `preflight` | Restarts; preflights change nothing but metadata. Partial work from an earlier attempt stays in place |
 | `ready` | The gate is checked again; the preflight is rerun if stale |
 | `running`, `verification` | Back to `ready`, partial work kept, and the next session is told to inspect it and continue |
 | `committing` | A commit with this task's exact `Task:` line is adopted; otherwise the stored message is used |
@@ -55,6 +55,7 @@ A fresh clone has no `.ajimu-autopilot/`. Run `setup` there and set the project'
 other configuration again: they do not travel with the repository. Task records do not either,
 so open tasks get a new preflight, and correction history stays on the machine that made it.
 
-An interrupted attempt keeps its attempt count. A stop request or a usage limit gives the
-attempt back, because neither says anything about the work. A usage limit does not need
-`resume`: the runner waits and continues by itself, as described in the safety reference.
+An interrupted attempt, including one ended by Ctrl+C, keeps its attempt count. A stop request
+or a usage limit gives the attempt back, because neither says anything about the work. A usage
+limit does not need `resume`: the runner waits and continues by itself, as described in the
+safety reference.

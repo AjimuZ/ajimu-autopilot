@@ -1,7 +1,11 @@
 """Checks the runner executes itself, so a task's success never rests on a session's claim."""
+import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
+
+from . import processes
 
 SECRET_PATTERNS = (
     ('private key', re.compile(r'-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----')),
@@ -33,26 +37,45 @@ def run_checks(root, checks, timeout_seconds, should_stop=None):
     Commands come from the project configuration, which sessions may not edit, and
     run through the shell so npm-style shims and `&&` behave as they do by hand.
     Never raises for a failing check. A failing required check stops the sequence,
-    since later checks would only report the same breakage.
+    since later checks would only report the same breakage. A stop request ends the
+    running check and leaves it out of the results.
     """
     results, ok = [], True
     for check in checks:
         if should_stop and should_stop():
             return {'ok': False, 'results': results, 'stopped': True}
         required = check.get('required', True)
-        try:
-            process = subprocess.run(check['command'], cwd=str(root), shell=True, capture_output=True, text=True,
-                                     encoding='utf-8', errors='replace', timeout=timeout_seconds)
-            passed, tail = process.returncode == 0, (process.stdout + process.stderr)[-OUTPUT_TAIL:]
-            code = process.returncode
-        except subprocess.TimeoutExpired:
-            passed, tail, code = False, f'timed out after {timeout_seconds}s', None
+        code, tail, outcome = _run_command(check['command'], root, timeout_seconds, should_stop)
+        if outcome == 'stopped':
+            return {'ok': False, 'results': results, 'stopped': True}
+        if outcome == 'timed_out':
+            # Last, because findings keep only the end of this text.
+            code, tail = None, f'{tail}\ntimed out after {timeout_seconds}s'
+        passed = code == 0
         results.append({'name': check['name'], 'command': check['command'], 'required': required,
                         'passed': passed, 'exit_code': code, 'output_tail': '' if passed else tail})
         if not passed and required:
             ok = False
             break
     return {'ok': ok and bool(results), 'results': results, 'stopped': False}
+
+
+def _run_command(command, root, timeout_seconds, should_stop):
+    """Run one shell command; return (exit code, end of its output, outcome of wait_bounded).
+
+    The output goes to a file because a pipe stays open while any descendant of the shell
+    lives, so waiting on one would outlast the timeout. Input is empty because no person
+    can answer a prompt.
+    """
+    with tempfile.TemporaryFile() as output:
+        process = subprocess.Popen(command, cwd=str(root), shell=True, stdin=subprocess.DEVNULL, stdout=output,
+                                   stderr=subprocess.STDOUT, **processes.GROUP_OPTIONS)
+        outcome = processes.wait_bounded(process, timeout_seconds, should_stop)
+        output.seek(0, os.SEEK_END)
+        # Four bytes is the longest UTF-8 character, so this keeps OUTPUT_TAIL characters at least.
+        output.seek(max(output.tell() - OUTPUT_TAIL * 4, 0))
+        tail = output.read().decode('utf-8', errors='replace').replace('\r\n', '\n')[-OUTPUT_TAIL:]
+    return process.returncode, tail, outcome
 
 
 def scan_change(root, git):

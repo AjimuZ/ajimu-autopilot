@@ -57,9 +57,12 @@ def write_json_atomic(path, data):
 
 
 def read_json(path, default=None):
-    """Return the parsed file, or `default` when it is absent. Corrupt JSON raises ValueError."""
+    """Return the parsed file, or `default` when it is absent. Corrupt JSON raises ValueError.
+
+    A byte order mark is accepted, because Windows tools add one to files edited by hand.
+    """
     try:
-        text = Path(path).read_text(encoding='utf-8')
+        text = Path(path).read_text(encoding='utf-8-sig')
     except FileNotFoundError:
         return default
     return json.loads(text)
@@ -107,6 +110,15 @@ class RunnerLock:
         except ValueError:
             return {'pid': -1, 'host': socket.gethostname(), 'corrupt': True}
 
+    @staticmethod
+    def _owner_is_live(owner):
+        return owner.get('host') != socket.gethostname() or pid_alive(int(owner.get('pid', -1)))
+
+    def is_active(self):
+        """Tell whether a live process owns the lock. Another host's lock counts, as it cannot be inspected."""
+        owner = self.owner()
+        return owner is not None and self._owner_is_live(owner)
+
     def acquire(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         for _ in range(2):
@@ -116,7 +128,7 @@ class RunnerLock:
                 owner = self.owner()
                 if owner is None:
                     continue
-                if owner.get('host') != socket.gethostname() or pid_alive(int(owner.get('pid', -1))):
+                if self._owner_is_live(owner):
                     raise LockHeld(owner)
                 try:
                     self.path.unlink()

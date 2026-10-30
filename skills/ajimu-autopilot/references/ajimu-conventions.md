@@ -49,4 +49,5 @@ check. Unaffected documentation stays untouched.
 
 It rejects tool and vendor names anywhere in a message. A project that really is about one
 of those tools needs wording that avoids the name, or the attempt fails and is retried with
-the validator's output.
+the validator's output. No wording can help a task ID holding such a name, because every commit
+of the task carries it: that task is blocked before any session runs, and `validate` names it.

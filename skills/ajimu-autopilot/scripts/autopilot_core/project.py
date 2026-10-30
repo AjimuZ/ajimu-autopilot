@@ -123,11 +123,13 @@ def validate_config(config):
         problems.append(f'preflight.effort is unknown: {config["preflight"]["effort"]}')
     limits = config['limits']
     for name in ('max_iterations', 'session_timeout_minutes', 'check_timeout_minutes', 'global_timeout_minutes',
-                 'usage_retry_minutes'):
+                 'usage_retry_minutes', 'preflight_max_rounds'):
         if not isinstance(limits.get(name), int) or limits[name] <= 0:
             problems.append(f'limits.{name} must be a positive integer; an unlimited run is not allowed')
-    if not isinstance(limits.get('max_fix_attempts'), int) or limits['max_fix_attempts'] < 0:
-        problems.append('limits.max_fix_attempts must be zero or more')
+    for name in ('max_fix_attempts', 'keep_session_logs'):
+        if not isinstance(limits.get(name), int) or limits[name] < 0:
+            problems.append(f'limits.{name} must be zero or more')
+    problems += check_problems(config['checks'])
     permissions = config['permissions']
     for rule in permissions.get('bash_allow', []):
         if UNSAFE_ALLOW.match(f'Bash({rule})'):
@@ -139,6 +141,16 @@ def validate_config(config):
     if command and any(mode in str(command) for mode in UNSAFE_MODES + ('--fallback-model', '--model')):
         problems.append('claude.command must not carry permission or model flags')
     return problems
+
+
+def check_problems(checks):
+    """Return why `checks` cannot be run, or an empty list. Sessions edit this list by hand."""
+    def usable(check):
+        return isinstance(check, dict) and all(isinstance(check.get(name), str) and check[name].strip()
+                                               for name in ('name', 'command'))
+    if isinstance(checks, list) and all(usable(check) for check in checks):
+        return []
+    return ['checks must be a list of objects such as {"name": "test", "command": "npm test", "required": true}']
 
 
 def _scripts(root):
@@ -207,15 +219,17 @@ def bash_rules_for_checks(checks):
     return list(dict.fromkeys(rules))
 
 
-def _project_relative(root, path):
-    """Return a project-relative POSIX path, so no machine-specific path enters tracked files."""
-    candidate = Path(path)
-    if candidate.is_absolute():
-        try:
-            candidate = candidate.resolve().relative_to(Path(root).resolve())
-        except ValueError:
-            raise ValueError(f'the roadmap must be inside the project: {path}') from None
-    return candidate.as_posix()
+def project_relative(root, path):
+    """Return a roadmap path as project-relative POSIX, so no machine-specific path enters tracked files.
+
+    A relative `path` starts at the project root. Raises ValueError for a path outside the
+    project, because the runner edits this file and Git could not see that edit.
+    """
+    base = Path(root).resolve()
+    try:
+        return (base / path).resolve().relative_to(base).as_posix()
+    except ValueError:
+        raise ValueError(f'the roadmap must be inside the project: {path}') from None
 
 
 def find_first(root, names):
@@ -244,11 +258,13 @@ def setup(root, roadmap_path=None, branch=None, remote=None):
         config['checks'] = detect_checks(project.root)
         if not config['checks']:
             report['warnings'].append('no check command was detected; add "checks" before running')
+    if check_problems(config['checks']):
+        raise ValueError('; '.join(check_problems(config['checks'])))
     config['permissions']['bash_allow'] = list(dict.fromkeys(
         config['permissions']['bash_allow'] + bash_rules_for_checks(config['checks'])))
     config['docs']['changelog'] = config['docs']['changelog'] or find_first(project.root, CHANGELOG_NAMES)
     if roadmap_path:
-        config['docs']['roadmap'] = _project_relative(project.root, roadmap_path)
+        config['docs']['roadmap'] = project_relative(project.root, roadmap_path)
     config['docs']['roadmap'] = config['docs']['roadmap'] or find_first(project.root, ROADMAP_NAMES)
     problems = validate_config(config)
     if problems:
@@ -258,7 +274,8 @@ def setup(root, roadmap_path=None, branch=None, remote=None):
         report['updated' if existed else 'created'].append(project.config_path.relative_to(project.root).as_posix())
 
     plan_existed = project.prd_path.is_file()
-    plan = read_json(project.prd_path) if plan_existed else prd_module.new_plan(project.root.name, config['git']['branch'])
+    plan = (prd_module.load_valid(project.prd_path) if plan_existed
+            else prd_module.new_plan(project.root.name, config['git']['branch']))
     before = json.dumps(plan, sort_keys=True)
     if plan['branchName'] != config['git']['branch']:
         plan['branchName'] = config['git']['branch']
@@ -279,6 +296,9 @@ def setup(root, roadmap_path=None, branch=None, remote=None):
     if project.ensure_runtime():
         report['updated'].append('.gitignore')
     project.tasks_dir.mkdir(parents=True, exist_ok=True)
+    git = gitops.Git(project.root)
+    if git.is_repository() and not git.is_root():
+        report['warnings'].append('this folder is not the root of its Git repository, and the runner refuses to work there')
     return report
 
 

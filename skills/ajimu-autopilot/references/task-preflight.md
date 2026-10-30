@@ -68,5 +68,6 @@ below the floor. A retry on the same task and commit reuses the valid preflight.
 python scripts/autopilot.py preflight --task P02.1 --project PATH
 ```
 
-This saves the result without implementing. The routing and validation logic can also be
-tested with no process at all (`tests/test_preflight.py`, `tests/test_routing.py`).
+This saves the result without implementing. A finished or blocked task is refused, and the
+exit status is 4 only when the task ended up blocked. The routing and validation logic can
+also be tested with no process at all (`tests/test_preflight.py`, `tests/test_routing.py`).

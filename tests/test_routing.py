@@ -1,5 +1,8 @@
 """Model policy: Sonnet is the floor everywhere, and effort claims stay truthful."""
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import support  # noqa: F401
 from autopilot_core import claude_cli, routing
@@ -83,6 +86,10 @@ class EffortTests(unittest.TestCase):
         with self.assertRaises(routing.RoutingError):
             routing.compatible_effort('claude-opus-5-5', 'ultra')
 
+    def test_context_suffix_keeps_the_levels_of_the_model(self):
+        self.assertEqual(('xhigh', None), routing.compatible_effort('claude-opus-5[1m]', 'xhigh'))
+        self.assertEqual('high', routing.compatible_effort('claude-opus-4-6[1m]', 'xhigh')[0])
+
 
 class CommandLineTests(unittest.TestCase):
     def request(self, **overrides):
@@ -129,6 +136,29 @@ class CommandLineTests(unittest.TestCase):
         silent = claude_cli.model_report(claude_cli.SessionResult(actual_models=['claude-opus-5-5']), 'sonnet')
         self.assertEqual(['opus'], silent['fallback'])
         self.assertFalse(silent['downgraded'])
+
+
+class StreamTests(unittest.TestCase):
+    def test_line_separators_inside_a_string_do_not_lose_the_result(self):
+        event = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'a b\u0085c', 'total_cost_usd': 0.5}
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / 'stream.jsonl'
+            path.write_text('not json\n' + json.dumps(event, ensure_ascii=False) + '\n', encoding='utf-8')
+            result = claude_cli.parse_stream(path)
+        self.assertTrue(result.has_result)
+        self.assertEqual(0.5, result.cost_usd)
+        self.assertEqual('a b\u0085c', result.result_text)
+
+    def test_synthetic_entries_are_not_models_that_ran(self):
+        event = {'type': 'result', 'subtype': 'success', 'is_error': True, 'result': '',
+                 'modelUsage': {'<synthetic>': {}, 'claude-sonnet-5-5': {'canonicalModel': 'claude-sonnet-5-5'}}}
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / 'stream.jsonl'
+            path.write_text(json.dumps({'type': 'system', 'subtype': 'init', 'model': '<synthetic>'}) + '\n'
+                            + json.dumps(event) + '\n', encoding='utf-8')
+            result = claude_cli.parse_stream(path)
+        self.assertEqual(['claude-sonnet-5-5'], result.actual_models)
+        self.assertEqual([], claude_cli.model_report(result, 'sonnet')['forbidden'])
 
 
 if __name__ == '__main__':

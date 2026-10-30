@@ -41,7 +41,7 @@ def check_settings(project, report):
         except (ValueError, OSError) as error:
             report.add(f'settings {path.name}', False, f'{path}: {error}', blocking=False)
             continue
-        if not data:
+        if not data or not isinstance(data, dict):
             continue
         for key in ('fallbackModel', 'model'):
             names = data.get(key)
@@ -53,7 +53,7 @@ def check_settings(project, report):
         overrides = sorted(set(env) & set(claude_cli.ROUTING_VARIABLES))
         if overrides:
             report.add('settings env', False, f'{path} sets {overrides}, which can change the session model', False)
-        if 'managed' in str(path) and data.get('availableModels') is not None:
+        if 'managed' in path.name and data.get('availableModels') is not None:
             allowed = data['availableModels']
             usable = [name for name in allowed if not routing.forbidden_in_usage([name])]
             report.add('managed availableModels', bool(usable), f'{path}: {allowed}')
@@ -71,18 +71,19 @@ def run(root, live=False, environ=None):
         report.add('configuration', False, f'{project.config_path} or {project.prd_path} is missing; run setup')
         return report
     config = project.config()
-    problems = project_module.validate_config(config)
-    report.add('configuration', not problems, '; '.join(problems) or str(project.config_path))
+    config_problems = project_module.validate_config(config)
+    report.add('configuration', not config_problems, '; '.join(config_problems) or str(project.config_path))
     plan = prd_module.load(project.prd_path)
-    problems = prd_module.validate(plan)
-    stories = plan.get('userStories', [])
-    pending = [item for item in stories if not item.get('passes')]
-    report.add('roadmap plan', not problems and bool(stories),
-               '; '.join(problems) or f'{len(stories)} tasks, {len(pending)} open')
-    report.add('branch name matches plan', plan.get('branchName') == config['git']['branch'],
-               f'{plan.get("branchName")} / {config["git"]["branch"]}')
-    report.add('project checks configured', bool(config['checks']),
-               ', '.join(check['command'] for check in config['checks']) or 'add commands to "checks"')
+    plan_problems = prd_module.validate(plan)
+    stories = [] if plan_problems else plan['userStories']
+    pending = [item for item in stories if not item['passes']]
+    report.add('roadmap plan', not plan_problems and bool(stories),
+               '; '.join(plan_problems) or f'{len(stories)} tasks, {len(pending)} open')
+    branch_name = plan.get('branchName') if isinstance(plan, dict) else None
+    report.add('branch name matches plan', branch_name == config['git']['branch'],
+               f'{branch_name} / {config["git"]["branch"]}')
+    commands = [] if project_module.check_problems(config['checks']) else [check['command'] for check in config['checks']]
+    report.add('project checks configured', bool(commands), ', '.join(commands) or 'add commands to "checks"')
     source = config['docs'].get('roadmap')
     report.add('roadmap document', bool(source) and (project.root / source).is_file(), source or 'none', blocking=False)
 
@@ -93,7 +94,8 @@ def run(root, live=False, environ=None):
         except routing.ForbiddenModel:
             report.add(label, True, 'rejected')
     try:
-        decisions = [routing.select(task_type) for task_type in routing.policy_table(config['routing'].get('overrides'))]
+        overrides = config['routing'].get('overrides')
+        decisions = [routing.select(task_type, overrides=overrides) for task_type in routing.policy_table(overrides)]
         report.add('model routing', all(d.model in routing.ALLOWED_FAMILIES for d in decisions),
                    f'{len(decisions)} task types route to Sonnet or Opus')
     except (routing.RoutingError, routing.ForbiddenModel) as error:
@@ -110,6 +112,10 @@ def run(root, live=False, environ=None):
             path.write_text('Keep drafts\n\nCo-Authored-By: Someone <someone@example.invalid>\n', encoding='utf-8')
             bad, _ = conventions.check_message(found, path)
         report.add('commit message validator', good and not bad, 'accepts neutral and rejects co-author messages')
+        refused = conventions.refused_task_ids(found, [item['id'] for item in pending])
+        if refused:
+            report.add('task IDs in commit messages', False, f'{", ".join(refused)}: the validator refuses each of these on the '
+                       '`Task:` line of its commit, so it could never finish. Rename it, keeping its source')
 
     command = claude_cli.find_claude(config['claude'].get('command'), environ)
     version = ''
@@ -136,6 +142,8 @@ def run(root, live=False, environ=None):
     is_repo = git.is_repository()
     report.add('Git repository', is_repo and git.has_commits(), str(project.root))
     if is_repo:
+        report.add('project at the repository root', git.is_root(),
+                   'yes' if git.is_root() else 'this folder is inside a larger repository; configure the project at its root')
         name, email = git.identity()
         report.add('Git identity', bool(name and email), f'{name} <{email}>' if name else 'not configured')
         report.add('working branch', git_config['branch'] not in git_config['protected_branches'], git_config['branch'])
@@ -154,7 +162,10 @@ def run(root, live=False, environ=None):
                    f'the next run stops tracking {len(tracked)} files; they stay on disk, and other clones need setup again'
                    if tracked else f'{gitops.IGNORE_RULE} is ignored' if git.metadata_ignored()
                    else f'the next run adds {gitops.IGNORE_RULE} to .gitignore', blocking=False)
-    if live and command and found:
+    if live and (config_problems or plan_problems):
+        report.add('live probes', False, 'skipped: nothing is spent until the configuration and the plan are valid',
+                   blocking=False)
+    elif live and command and found:
         live_probes(project, config, command, report, environ)
     return report
 
@@ -168,10 +179,12 @@ def live_probes(project, config, command, report, environ):
     """Measure which models really run and cache the result for routing.
 
     `--model` can be silently replaced when a model is unavailable, so a family counts
-    as available only when the session reports that family in its own usage. Also runs
-    one real preflight without saving it.
+    as available only when the session reports that family in its own usage. A usage limit
+    leaves a family counted as available: this result is cached for later runs, and the
+    limit says nothing about what the account can use. Also runs one real preflight
+    without saving it.
     """
-    families, resolved = [], {}
+    families, resolved, limited = [], {}, False
     base = dict(environ)
     for family in routing.ALLOWED_FAMILIES:
         with tempfile.TemporaryDirectory(prefix='ajimu-probe-') as scratch:
@@ -181,6 +194,12 @@ def live_probes(project, config, command, report, environ):
                 timeout_seconds=180, max_budget_usd=1, setting_sources='project,local')
             result = claude_cli.run_session(command, request, None, base)
         check = claude_cli.model_report(result, family)
+        if result.transient and not check['forbidden']:
+            limited = True
+            families.append(family)
+            report.add(f'live {family}', False, f'usage or service limit (status {result.api_error_status}); '
+                       'availability was not measured', blocking=False)
+            continue
         healthy = result.has_result and not result.is_error and not check['forbidden'] and not check['fallback']
         report.add(f'live {family}', healthy, f'requested {family}; ran {check["actual"]}; '
                    f'{result.subtype}; {result.cost_usd:.4f} USD; effort low was sent but cannot be read back', blocking=family == 'sonnet')
@@ -196,8 +215,8 @@ def live_probes(project, config, command, report, environ):
                    else ', '.join(level for level in routing.EFFORTS if level in levels) or 'takes no effort', False)
     plan = prd_module.load(project.prd_path)
     pending = [item for item in plan['userStories'] if not item['passes']]
-    if not pending or 'sonnet' not in families:
-        report.add('live preflight', False, 'skipped: no open task or Sonnet is unavailable', blocking=False)
+    if not pending or 'sonnet' not in families or limited:
+        report.add('live preflight', False, 'skipped: no open task, Sonnet is unavailable, or usage ran out', blocking=False)
         return
     report.add('live preflight', *live_preflight(project, config, command, pending[0], base))
 

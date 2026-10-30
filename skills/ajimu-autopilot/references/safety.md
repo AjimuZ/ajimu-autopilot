@@ -61,12 +61,12 @@ would running its code.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `limits.max_iterations` | 30 | Stops the run; `resume` continues |
+| `limits.max_iterations` | 30 | Per run. Stops the run; `resume` continues with a new count |
 | `limits.max_fix_attempts` | 2 | Retries after the first attempt, then blocks |
 | `limits.preflight_max_rounds` | 3 | Preflight rounds per task, then blocks |
 | `limits.session_timeout_minutes` | 60 | Ends a session; counts as a failed attempt |
 | `limits.usage_retry_minutes` | 5 | Retry interval during a usage wait with no known reset time |
-| `limits.check_timeout_minutes` | 20 | Fails a check |
+| `limits.check_timeout_minutes` | 20 | Ends a check and everything it started; fails the check |
 | `limits.global_timeout_minutes` | 720 | Stops the run; `resume` continues |
 | `limits.max_budget_usd_per_session` | 25 | Passed to `--max-budget-usd` |
 | `limits.max_budget_usd_total` | 150 | Stops the run when the estimate reaches it |
@@ -91,8 +91,11 @@ is known. Then the same task continues, and its partial work stays in the workin
 
 ## Other controls
 
-- One runner per project, through an exclusive lock with stale-lock detection.
-- `stop` ends the current session safely. A pending stop prevents `run` until `resume`.
+- One runner per project, through an exclusive lock with stale-lock detection. `setup`,
+  `import-roadmap` and `unblock` are refused while a runner is active.
+- `stop` ends the current session or check safely. A pending stop prevents `run` until `resume`.
+- Ctrl+C or a termination signal ends the current session or check as well, so nothing keeps
+  editing the project after the runner has gone. The exit status is 3, and `resume` continues.
 - Errors are appended to `runtime/errors.log`; `status` shows the latest.
 - The change scan blocks likely secrets, sensitive files and disabled or deleted tests. It
   uses patterns and can miss things.

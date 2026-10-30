@@ -29,6 +29,15 @@ def load(path):
     return prd
 
 
+def load_valid(path):
+    """Return the plan, or raise PlanError naming every problem that makes it unsafe to use."""
+    prd = load(path)
+    problems = validate(prd)
+    if problems:
+        raise PlanError('; '.join(problems))
+    return prd
+
+
 def save(path, prd):
     problems = validate(prd)
     if problems:
@@ -81,8 +90,16 @@ def find_cycle(stories):
     return None
 
 
+def _well_formed_dependencies(item):
+    depends = item.get('dependsOn')
+    return depends is None or (isinstance(depends, list) and all(isinstance(target, str) for target in depends))
+
+
 def validate(prd):
-    """Return every problem that would make the plan unsafe to schedule, or an empty list."""
+    """Return every problem that would make the plan unsafe to schedule, or an empty list.
+
+    Never raises for a malformed plan, which is usually a hand edit: each problem is named.
+    """
     problems = []
     if not isinstance(prd, dict):
         return ['prd.json must contain a JSON object']
@@ -104,9 +121,13 @@ def validate(prd):
             continue
         if not isinstance(item['id'], str) or not TASK_ID.match(item['id']):
             problems.append(f'{label}: id must match {TASK_ID.pattern}')
+            if not isinstance(item['id'], str):
+                continue
         if item['id'] in seen:
             problems.append(f'{label}: duplicate id')
         seen.add(item['id'])
+        if not _well_formed_dependencies(item):
+            problems.append(f'{label}: dependsOn must be a list of task IDs')
         criteria = item['acceptanceCriteria']
         if not isinstance(criteria, list) or not criteria or not all(isinstance(c, str) and c.strip() for c in criteria):
             problems.append(f'{label}: acceptanceCriteria must be a non-empty list of strings')
@@ -117,7 +138,8 @@ def validate(prd):
         for name in ('title', 'description'):
             if not isinstance(item[name], str) or not item[name].strip():
                 problems.append(f'{label}: {name} must be a non-empty string')
-    valid = [item for item in stories if isinstance(item, dict) and 'id' in item]
+    valid = [item for item in stories
+             if isinstance(item, dict) and isinstance(item.get('id'), str) and _well_formed_dependencies(item)]
     for item in valid:
         for target in item.get('dependsOn') or []:
             if target not in seen:
@@ -132,17 +154,18 @@ def select_next(prd, statuses):
     """Return the next runnable story, or None.
 
     A story already in flight goes first so an interrupted task resumes before new
-    work starts. Otherwise the lowest priority number with satisfied dependencies
-    wins, ties keeping plan order. `statuses` maps task IDs to runner states.
+    work starts. Otherwise the lowest priority number wins, ties keeping plan order.
+    Either way its dependencies must be satisfied: a standalone preflight can leave a
+    task `ready` before they are. `statuses` maps task IDs to runner states.
     """
     in_flight = ('ready', 'running', 'verification', 'preflight')
-    for item in prd['userStories']:
-        if statuses.get(item['id']) in in_flight and not item['passes']:
-            return item
     done = {item['id'] for item in prd['userStories'] if item['passes']}
-    candidates = [item for item in prd['userStories']
-                  if not item['passes'] and statuses.get(item['id'], 'pending') == 'pending'
-                  and all(dep in done for dep in item.get('dependsOn') or [])]
+    runnable = [item for item in prd['userStories']
+                if not item['passes'] and all(dep in done for dep in item.get('dependsOn') or [])]
+    for item in runnable:
+        if statuses.get(item['id']) in in_flight:
+            return item
+    candidates = [item for item in runnable if statuses.get(item['id'], 'pending') == 'pending']
     return min(candidates, key=lambda item: item['priority']) if candidates else None
 
 
@@ -237,10 +260,11 @@ def apply_split(prd, task_id, children):
 
 
 def tick_roadmap(root, item):
-    """Flip the roadmap checkbox behind a story; return True when the file changed.
+    """Mark the roadmap line behind a story as done; return True when the line now reads done.
 
-    Only an exact, unchecked line recorded by the importer is edited, so a line
-    rewritten by hand stays as it is and is simply reported as not found.
+    Only an exact line recorded by the importer is edited, so a line rewritten by hand
+    stays as it is and returns False. A `- TODO:` bullet has no checkbox, so it becomes a
+    ticked one, which imports to the same ID. A line already ticked is left alone.
     """
     source = item.get('source') or {}
     path, line = source.get('path'), source.get('line')
@@ -252,16 +276,23 @@ def tick_roadmap(root, item):
         text = target.read_bytes().decode('utf-8')
     except (OSError, UnicodeDecodeError):
         return False
-    updated, count = re.subn(rf'^([ \t]*[-*+][ \t]+)\[ \]([ \t]+{re.escape(line)}[ \t]*\r?)$', r'\1[x]\2', text, count=1,
-                             flags=re.MULTILINE)
-    if not count:
-        return False
-    target.write_bytes(updated.encode('utf-8'))
-    return True
+    body = rf'{re.escape(line)}[ \t]*\r?)$'
+    for pattern, replacement in ((rf'^([ \t]*[-*+][ \t]+)\[ \]([ \t]+{body}', r'\1[x]\2'),
+                                 (rf'^([ \t]*[-*+][ \t]+)(?i:TODO|FIXME)[ \t]*[:\-][ \t]*({body}', r'\1[x] \2')):
+        updated, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE)
+        if count:
+            target.write_bytes(updated.encode('utf-8'))
+            return True
+    return bool(re.search(rf'^[ \t]*[-*+][ \t]+\[[xX]\][ \t]+{re.escape(line)}[ \t]*\r?$', text, flags=re.MULTILINE))
 
 
 def siblings_open(prd, item):
-    """Tell whether other parts of a split task remain, so their shared roadmap line must wait."""
-    parent = item.get('splitFrom')
-    return bool(parent) and any(other.get('splitFrom') == parent and other['id'] != item['id'] and not other['passes']
-                                for other in prd['userStories'])
+    """Tell whether other parts of a split task remain, so their shared roadmap line must wait.
+
+    Parts are matched by the line they trace to rather than by `splitFrom`, which names
+    only the direct parent and would miss the children of a part that was split again.
+    """
+    source = item.get('source')
+    return bool(source and item.get('splitFrom')) and any(
+        other.get('splitFrom') and other.get('source') == source and other['id'] != item['id'] and not other['passes']
+        for other in prd['userStories'])

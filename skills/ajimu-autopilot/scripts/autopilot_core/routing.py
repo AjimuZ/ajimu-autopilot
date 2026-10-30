@@ -28,10 +28,11 @@ POLICY = {
 
 _ALL_EFFORTS = frozenset(EFFORTS)
 # Documented per model at code.claude.com/docs/en/model-config; a family and major
-# version prefix keeps newer minor releases working without an update here.
+# version prefix keeps newer minor releases working without an update here. A version
+# can end the ID or be followed by a date or a context suffix such as [1m].
 _EFFORT_SUPPORT = (
-    (re.compile(r'claude-(?:opus|sonnet)-(?:[5-9]|\d\d)(?:-|$)'), _ALL_EFFORTS),
-    (re.compile(r'claude-(?:opus|sonnet)-4-[6-9](?:-|$)'), frozenset(('low', 'medium', 'high', 'max'))),
+    (re.compile(r'claude-(?:opus|sonnet)-(?:[5-9]|\d\d)(?:[-\[]|$)'), _ALL_EFFORTS),
+    (re.compile(r'claude-(?:opus|sonnet)-4-[6-9](?:[-\[]|$)'), frozenset(('low', 'medium', 'high', 'max'))),
     (re.compile(r'claude-(?:opus|sonnet)-'), frozenset()),
 )
 

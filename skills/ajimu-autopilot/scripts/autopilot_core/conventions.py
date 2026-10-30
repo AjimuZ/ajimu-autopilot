@@ -6,6 +6,7 @@ works from the rules the owner actually has installed.
 import hashlib
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,7 +36,9 @@ def candidates(project_root=None, home=None):
     found.append(home / '.claude' / 'skills' / SKILL)
     plugin_cache = home / '.claude' / 'plugins' / 'cache'
     if plugin_cache.is_dir():
-        found.extend(path.parent for path in sorted(plugin_cache.glob(f'**/skills/{SKILL}/SKILL.md')))
+        # Newest install first: the cache can hold several versions, and their folder names need not sort.
+        copies = sorted(plugin_cache.glob(f'**/skills/{SKILL}/SKILL.md'), key=lambda path: path.stat().st_mtime, reverse=True)
+        found.extend(path.parent for path in copies)
     return found
 
 
@@ -54,3 +57,14 @@ def check_message(conventions, message_file):
     process = subprocess.run([sys.executable, str(conventions.validator), str(message_file)], capture_output=True,
                              text=True, encoding='utf-8', errors='replace')
     return process.returncode == 0, (process.stdout + process.stderr).strip()
+
+
+def refused_task_ids(found, task_ids):
+    """Return the IDs the validator refuses on a `Task:` line; no commit of those tasks could ever pass."""
+    with tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / 'message'
+
+        def accepted(ids):
+            path.write_text('Keep the plan current\n\n' + ''.join(f'Task: {task_id}\n' for task_id in ids), encoding='utf-8')
+            return check_message(found, path)[0]
+        return [] if accepted(task_ids) else [task_id for task_id in task_ids if not accepted([task_id])]

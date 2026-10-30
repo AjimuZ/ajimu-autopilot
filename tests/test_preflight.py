@@ -1,6 +1,8 @@
 """Preflight contract and plan rules, without any process or repository."""
 import copy
+import tempfile
 import unittest
+from pathlib import Path
 
 from support import ready_preflight
 from autopilot_core import prd, preflight, roadmap
@@ -174,6 +176,21 @@ class SplitTests(unittest.TestCase):
         with self.assertRaises(preflight.PreflightInvalid):
             preflight.validate_result(answer(item, outcome='split', split_tasks=self.children(1)), item, 'abc')
 
+    def test_nested_split_keeps_the_shared_roadmap_line_open(self):
+        big = story('T', source={'path': 'R.md', 'section': 'S', 'line': 'Big'})
+        updated, _ = prd.apply_split(plan(big), 'T', self.children())
+        updated, _ = prd.apply_split(updated, 'T.1', self.children())
+        self.assertEqual(['T.1.1', 'T.1.2', 'T.2'], [item['id'] for item in updated['userStories']])
+        self.assertTrue(prd.siblings_open(updated, prd.story(updated, 'T.2')))
+        for task_id in ('T.1.1', 'T.1.2'):
+            prd.story(updated, task_id)['passes'] = True
+        self.assertFalse(prd.siblings_open(updated, prd.story(updated, 'T.2')))
+
+    def test_repeated_roadmap_lines_are_independent_for_ticking(self):
+        one = story('A', source={'path': 'R.md', 'section': 'S', 'line': 'Same'})
+        two = story('A-2', source={'path': 'R.md', 'section': 'S', 'line': 'Same'})
+        self.assertFalse(prd.siblings_open(plan(one, two), one))
+
 
 class PlanTests(unittest.TestCase):
     def test_validation_reports_each_problem(self):
@@ -200,6 +217,23 @@ class PlanTests(unittest.TestCase):
     def test_interrupted_task_resumes_first(self):
         tasks = plan(story('A', priority=1), story('B', priority=9))
         self.assertEqual('B', prd.select_next(tasks, {'B': 'running'})['id'])
+
+    def test_in_flight_task_still_waits_for_its_dependencies(self):
+        tasks = plan(story('A', priority=5), story('B', priority=1, dependsOn=['A']))
+        self.assertEqual('A', prd.select_next(tasks, {'B': 'ready'})['id'])
+
+    def test_malformed_fields_are_reported_instead_of_raising(self):
+        for broken, expected in ((story(id=['x']), 'id must match'), (story(dependsOn=5), 'dependsOn must be'),
+                                 (story(dependsOn=[['A']]), 'dependsOn must be')):
+            with self.subTest(expected):
+                self.assertIn(expected, ' | '.join(prd.validate(plan(broken))))
+
+    def test_load_valid_names_the_problem(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / 'prd.json'
+            path.write_text('{"project": "p", "branchName": "b", "userStories": 5}', encoding='utf-8')
+            with self.assertRaisesRegex(prd.PlanError, 'must be a list'):
+                prd.load_valid(path)
 
 
 SAMPLE = """# Product roadmap
@@ -252,6 +286,80 @@ class RoadmapTests(unittest.TestCase):
         self.assertTrue(prd.story(existing, 'P01.2')['passes'])
         self.assertEqual([], roadmap.merge(existing, stories))
         self.assertEqual([], prd.validate(existing))
+
+    def test_repeated_lines_become_separate_tasks_with_stable_ids(self):
+        text = '# A\n\n- [ ] Add tests\n- [ ] P1 One\n\n# B\n\n- [ ] Add tests\n- [ ] P1 Two\n- [ ] P1-2 Three\n'
+        stories, _ = roadmap.parse(text)
+        ids = [item['id'] for item in stories]
+        self.assertEqual(5, len(set(ids)), ids)
+        self.assertEqual(ids, [item['id'] for item in roadmap.parse(text)[0]])
+        tasks = plan()
+        self.assertEqual(ids, roadmap.merge(tasks, stories))
+        self.assertEqual([], prd.validate(tasks))
+        self.assertEqual([], roadmap.merge(tasks, roadmap.parse(text)[0]))
+
+    def test_split_or_renamed_task_is_not_imported_again(self):
+        text = '- [ ] P01.1 Big work\n- [ ] P01.2 Other work\n'
+        tasks = plan()
+        roadmap.merge(tasks, roadmap.parse(text)[0])
+        children = [{'title': f'Part {n}', 'description': 'Part.', 'acceptanceCriteria': ['Works']} for n in (1, 2)]
+        tasks, _ = prd.apply_split(tasks, 'P01.1', children)
+        for task_id in ('P01.1.1', 'P01.1.2'):
+            tasks, _ = prd.apply_split(tasks, task_id, children)
+        prd.story(tasks, 'P01.2')['id'] = 'RENAMED'
+        self.assertEqual([], roadmap.merge(tasks, roadmap.parse(text)[0]))
+
+    def test_prose_is_not_mistaken_for_exit_or_dependency_lines(self):
+        text = ('# S\n\nExit the wizard when saved\n\n- [ ] Item\n  The result depends on the input format.\n'
+                '- TODO: Other. Depends on: P01\n')
+        stories, _ = roadmap.parse(text)
+        self.assertEqual(2, len(stories))
+        self.assertEqual(list(roadmap.DEFAULT_CRITERIA), stories[0]['acceptanceCriteria'])
+        self.assertIn('depends on the input format', stories[0]['description'])
+
+    def test_exit_and_dependency_lines_are_recognised_in_their_written_forms(self):
+        for line in ('Exit: done', '**Exit:** done', '**Exit**: done', 'Exit criteria: done', '**Exit checks:** done'):
+            with self.subTest(line):
+                self.assertIn('done', roadmap.parse(f'# S\n\n{line}\n\n- [ ] Item\n')[0][0]['acceptanceCriteria'])
+        for line in ('Depends on: P1.', '**Depends on:** P1', '**Depends on**: P1. **Areas:** x.'):
+            with self.subTest(line):
+                text = f'# P1\n\n- [ ] P1.1 First\n\n# P2\n\n{line}\n\n- [ ] P2.1 Second\n'
+                self.assertEqual(['P1.1'], roadmap.parse(text)[0][1]['dependsOn'])
+
+    def test_byte_order_mark_does_not_hide_the_first_heading(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            (Path(scratch) / 'R.md').write_bytes('﻿# P1 Core\n\n- [ ] Item\n'.encode('utf-8'))
+            stories, summary = roadmap.parse_file(scratch, 'R.md')
+            self.assertEqual(1, summary['sections'])
+            self.assertEqual('P1 Core', stories[0]['source']['section'])
+
+
+class RoadmapTickTests(unittest.TestCase):
+    def tick(self, content, line):
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / 'R.md'
+            path.write_bytes(content)
+            result = prd.tick_roadmap(scratch, {'source': {'path': 'R.md', 'line': line}})
+            return result, path.read_bytes()
+
+    def test_todo_bullet_becomes_a_ticked_checkbox(self):
+        self.assertEqual((True, b'# R\r\n\r\n- [x] Do it\r\n- TODO: Later\r\n'),
+                         self.tick(b'# R\r\n\r\n- TODO: Do it\r\n- TODO: Later\r\n', 'Do it'))
+        self.assertEqual((True, b'* [x] Do it\n'), self.tick(b'* fixme - Do it\n', 'Do it'))
+
+    def test_ticked_todo_bullet_keeps_its_task_id(self):
+        before = roadmap.parse('- TODO: Do it\n')[0][0]['id']
+        self.assertEqual(before, roadmap.parse(self.tick(b'- TODO: Do it\n', 'Do it')[1].decode('utf-8'))[0][0]['id'])
+
+    def test_line_already_ticked_counts_as_done_and_stays_the_same(self):
+        self.assertEqual((True, b'- [x] Do it\n'), self.tick(b'- [x] Do it\n', 'Do it'))
+
+    def test_a_rewritten_line_is_not_found_and_stays_the_same(self):
+        self.assertEqual((False, b'- [ ] Do it soon\n'), self.tick(b'- [ ] Do it soon\n', 'Do it'))
+
+    def test_repeated_lines_are_ticked_one_at_a_time(self):
+        self.assertEqual((True, b'- [x] Do it\n- [ ] Do it\n'), self.tick(b'- [ ] Do it\n- [ ] Do it\n', 'Do it'))
+        self.assertEqual((True, b'- [x] Do it\n- [x] Do it\n'), self.tick(b'- [x] Do it\n- [ ] Do it\n', 'Do it'))
 
 
 if __name__ == '__main__':

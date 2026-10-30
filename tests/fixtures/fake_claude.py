@@ -2,7 +2,8 @@
 
 The scenario file maps a phase name to a list of steps consumed in order. A step may
 set `structured`, `models`, `edits` (paths to contents), `delete`, `run` (argv),
-`is_error`, `subtype`, `api_error_status`, `rate_limited`, `resets_at`, `text`, `sleep`, or
+`is_error`, `subtype`, `api_error_status`, `rate_limited`, `resets_at`, `text`, `sleep`,
+`linger` (seconds a child outlives this process, holding its output handles), or
 `exit`. Phases come from the
 `AUTOPILOT-PHASE:` line of the prompt. `__VERSION__` and `__ACK__` in a structured value
 are replaced by the task version in the prompt and the ack token in the system file.
@@ -46,7 +47,8 @@ def main():
     ack = re.search(r'ACK-TOKEN: (\S+)', system)
     ack = ack.group(1) if ack else ''
     with open(log_path, 'a', encoding='utf-8') as handle:
-        handle.write(json.dumps({'phase': phase, 'argv': argv, 'cwd': os.getcwd(), 'prompt': prompt, 'has_conventions': 'Ajimu conventions' in system,
+        handle.write(json.dumps({'phase': phase, 'pid': os.getpid(), 'argv': argv, 'cwd': os.getcwd(), 'prompt': prompt,
+                                 'has_conventions': 'Ajimu conventions' in system,
                                  'env': {k: v for k, v in os.environ.items()
                                          if k.startswith(('ANTHROPIC_', 'CLAUDE_CODE_', 'CLAUDECODE'))}}) + '\n')
     scenario = json.loads(Path(scenario_path).read_text(encoding='utf-8'))
@@ -62,6 +64,9 @@ def main():
         Path(path).unlink()
     if step.get('run'):
         subprocess.run(step['run'], check=False, capture_output=True)
+    if step.get('linger'):
+        subprocess.Popen([sys.executable, '-c', f'import time; time.sleep({step["linger"]})'], close_fds=False,
+                         stdin=subprocess.DEVNULL)
     if 'exit' in step:
         return step['exit']
     requested = option(argv, '--model')

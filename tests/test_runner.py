@@ -6,9 +6,10 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from support import ROOT, SCRIPTS, Sandbox, done_output, ready_preflight, review_pass
-from autopilot_core import conventions, gitops, prd, runner as runner_module
+from autopilot_core import conventions, gitops, prd, quality, runner as runner_module
 from autopilot_core.store import LockHeld, RunnerLock, read_json, write_json_atomic
 
 
@@ -265,6 +266,24 @@ class RunnerTests(Sandbox):
         self.runner(max_iterations=1).run()
         self.assertIn('appears to be disabled', self.state()['tasks']['T-1']['findings'][0])
 
+    def test_secret_scan_survives_file_names_diff_settings_and_lookalike_lines(self):
+        self.layout = self.make_repository([self.story()])
+        names = ('caffè.txt', 'with space.txt', 'plain.txt')
+        for name in names:
+            (self.project / name).write_text('base\n', encoding='utf-8')
+        self.git('add', *names)
+        self.git('commit', '--quiet', '-m', 'Add three files')
+        secret = 'token = "ghp_' + 'a' * 36 + '"\n'
+        (self.project / names[0]).write_text('base\n' + secret, encoding='utf-8')
+        (self.project / names[1]).write_text('base\n' + secret, encoding='utf-8')
+        (self.project / names[2]).write_text('base\n++ a line that looks like a header\n' + secret, encoding='utf-8')
+        for setting, value in (('diff.noprefix', 'false'), ('diff.noprefix', 'true'), ('diff.mnemonicPrefix', 'true')):
+            with self.subTest(setting=setting, value=value):
+                self.git('config', setting, value)
+                findings = ' | '.join(quality.scan_change(self.project, gitops.Git(self.project)))
+                for name in names:
+                    self.assertIn(f'{name}: possible GitHub token', findings)
+
     def test_neutral_observations_do_not_fail_a_passing_review(self):
         self.layout = self.make_repository([self.story()])
         phases = self.happy()
@@ -326,6 +345,27 @@ class RunnerTests(Sandbox):
         self.runner(max_iterations=1).run()
         self.assertIn('was not found in ROADMAP.md', self.state()['tasks']['T-9']['findings'][0])
 
+    def roadmap_task_scenario(self, task_id='T-9'):
+        return dict(preflight=[{'structured': ready_preflight(task_id)}],
+                    implementation=[{'edits': self.edit(), 'structured': done_output()}],
+                    review=[{'structured': review_pass(item_criteria=prd.story(self.plan(), task_id)['acceptanceCriteria'])}])
+
+    def test_todo_bullet_completes_on_the_first_attempt(self):
+        self.layout = self.make_repository(roadmap='# Roadmap\n\n- TODO: T-9 Add greeting\n')
+        self.scenario(**self.roadmap_task_scenario())
+        self.assertEqual(0, self.runner().run(), self.lines)
+        self.assertEqual(1, len(self.launches('implementation')))
+        self.assertIn('- [x] T-9 Add greeting', self.git('show', 'HEAD:ROADMAP.md'))
+
+    def test_reopened_task_with_a_ticked_roadmap_line_completes(self):
+        self.layout = self.make_repository(roadmap='# Roadmap\n\n- [x] T-9 Add greeting\n')
+        plan = self.plan()
+        plan['userStories'][0]['passes'] = False
+        prd.save(self.layout.prd_path, plan)
+        self.scenario(**self.roadmap_task_scenario())
+        self.assertEqual(0, self.runner().run(), self.lines)
+        self.assertEqual(1, len(self.launches('implementation')))
+
     def test_split_children_tick_the_shared_roadmap_line_last(self):
         self.layout = self.make_repository(roadmap='# Roadmap\n\n- [ ] T-9 Big work\n')
         criteria = prd.story(self.plan(), 'T-9')['acceptanceCriteria']
@@ -365,6 +405,24 @@ class RunnerTests(Sandbox):
         self.scenario(**phases)
         self.runner(max_iterations=1).run()
         self.assertFalse(self.plan()['userStories'][0]['passes'])
+
+    def test_session_editing_runner_files_is_undone_when_a_limit_ends_it(self):
+        self.layout = self.make_repository([self.story()])
+        forged = self.layout.prd_path.read_text(encoding='utf-8').replace('"passes": false', '"passes": true')
+        phases = self.happy()
+        phases['implementation'].insert(0, {**self.LIMITED, 'edits': {str(self.layout.prd_path): forged}})
+        self.scenario(**phases)
+        worker, _ = self.waiting_runner()
+        self.assertEqual(runner_module.EXIT_COMPLETE, worker.run(), self.lines)
+        self.assertEqual(2, len(self.launches('implementation')), 'the forged completion must not end the task')
+        self.assertIn('Add greeting output', self.remote_log())
+
+    def test_task_id_the_validator_refuses_blocks_before_spending(self):
+        self.layout = self.make_repository([self.story('AI-3')])
+        self.assertEqual(runner_module.EXIT_BLOCKED, self.runner().run(), self.lines)
+        self.assertEqual([], self.launches())
+        self.assertIn('cannot appear in a commit message', self.state()['tasks']['AI-3']['blocked_reason'])
+        self.assertIn('Record plan changes', self.remote_log())
 
     def test_session_cannot_commit_behind_the_runner(self):
         self.layout = self.make_repository([self.story()])
@@ -462,6 +520,67 @@ class RunnerTests(Sandbox):
         self.assertEqual(self.git('rev-parse', 'HEAD'), self.git('rev-parse', 'autopilot/roadmap', cwd=self.remote))
         self.assertEqual(entry['commit'], self.state()['tasks']['T-1']['pushed_commit'])
 
+    def test_push_refused_again_on_restart_stays_resumable(self):
+        self.layout = self.make_repository([self.story()])
+        self.scenario(**self.happy())
+        self.git('switch', '--quiet', '-c', 'autopilot/roadmap')
+        self.git('add', '--all')
+        self.git('commit', '--quiet', '-m', 'Record the plan')
+        self.git('push', '--quiet', 'origin', 'autopilot/roadmap')
+        hook = self.remote / 'hooks' / 'pre-receive'
+        hook.write_text('#!/bin/sh\nexit 1\n', encoding='utf-8')
+        hook.chmod(0o755)
+        self.assertEqual(runner_module.EXIT_PAUSED, self.runner().run(), self.lines)
+        self.assertEqual(runner_module.EXIT_PAUSED, self.runner().run(), self.lines)
+        self.assertIn('resume', self.lines[-1])
+        self.assertEqual('pushing', self.state()['tasks']['T-1']['status'])
+        hook.unlink()
+        self.assertEqual(0, self.runner().run(), self.lines)
+        self.assertEqual('completed', self.state()['tasks']['T-1']['status'])
+
+    def test_remote_lost_after_the_commit_pauses_and_resume_publishes(self):
+        self.layout = self.make_repository([self.story()])
+        phases = self.happy()
+        phases['implementation'][0]['run'] = ['git', '-C', str(self.project), 'remote', 'set-url', 'origin', str(self.tmp / 'gone.git')]
+        self.scenario(**phases)
+        self.assertEqual(runner_module.EXIT_PAUSED, self.runner().run(), self.lines)
+        entry = self.state()['tasks']['T-1']
+        self.assertEqual('pushing', entry['status'])
+        self.assertTrue(entry['push_error'])
+        self.assertEqual(runner_module.EXIT_PAUSED, self.runner().run(), self.lines)
+        self.assertIn('resume', self.lines[-1])
+        self.git('remote', 'set-url', 'origin', str(self.remote))
+        self.assertEqual(0, self.runner().run(), self.lines)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.git('rev-parse', 'autopilot/roadmap', cwd=self.remote))
+
+    def test_rewritten_remote_history_is_reported_as_diverged(self):
+        self.layout = self.make_repository([self.story()])
+        self.git('switch', '--quiet', '-c', 'autopilot/roadmap')
+        self.git('add', '--all')
+        self.git('commit', '--quiet', '-m', 'Record the plan')
+        self.git('push', '--quiet', 'origin', 'autopilot/roadmap')
+        other = self.tmp / 'other'
+        self.git('clone', '--quiet', '-b', 'autopilot/roadmap', str(self.remote), str(other), cwd=self.tmp)
+        self.git('config', 'user.name', 'Other', cwd=other)
+        self.git('config', 'user.email', 'other@example.invalid', cwd=other)
+        self.git('commit', '--quiet', '--amend', '-m', 'Rewrite the plan commit', cwd=other)
+        self.git('push', '--quiet', '--force', 'origin', 'autopilot/roadmap', cwd=other)
+        self.assertEqual(runner_module.EXIT_ERROR, self.runner().run())
+        self.assertIn('diverged', self.lines[-1])
+
+    def test_project_below_the_repository_root_is_refused(self):
+        from autopilot_core import project as project_module
+        self.layout = self.make_repository([self.story()])
+        nested = self.project / 'sub'
+        nested.mkdir()
+        report = project_module.setup(nested)
+        self.assertTrue([warning for warning in report['warnings'] if 'root of its Git repository' in warning], report)
+        write_json_atomic(nested / '.ajimu-autopilot/config.json', self.layout.config())
+        worker = runner_module.Runner(nested, output=self.lines.append)
+        self.assertEqual(runner_module.EXIT_ERROR, worker.run())
+        self.assertIn('root of its Git repository', self.lines[-1])
+        self.assertEqual([], self.launches())
+
     def test_no_force_push_when_the_remote_diverged(self):
         self.layout = self.make_repository([self.story()])
         self.git('switch', '--quiet', '-c', 'autopilot/roadmap')
@@ -526,6 +645,51 @@ class RunnerTests(Sandbox):
         self.assertEqual(['completed', 'pending'], [self.state()['tasks'][t]['status'] for t in ('T-1', 'T-2')])
         self.assertEqual(0, self.runner(max_iterations=5).run(), self.lines)
 
+    def test_iteration_limit_applies_to_each_run_so_resume_continues(self):
+        self.layout = self.make_repository([self.story(), self.story('T-2', priority=2)])
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}, {'structured': ready_preflight('T-2')}],
+                      implementation=[{'edits': self.edit(), 'structured': done_output()},
+                                      {'edits': self.edit('b.txt', 'b\n'), 'structured': done_output('Add the second file')}],
+                      review=[{'structured': review_pass()}, {'structured': review_pass()}])
+        self.assertEqual(runner_module.EXIT_LIMIT, self.runner(max_iterations=1).run())
+        self.assertEqual(0, self.runner(max_iterations=1).run(), self.lines)
+        self.assertEqual(1, self.state()['iteration'])
+
+    def test_unknown_task_is_refused_rather_than_reported_as_processed(self):
+        self.layout = self.make_repository([self.story()])
+        self.assertEqual(runner_module.EXIT_USAGE, self.runner(only_task='NOPE').run())
+        self.assertIn('unknown task: NOPE', self.lines[-1])
+        self.assertEqual([], self.launches())
+
+    def test_stop_during_a_check_ends_it_and_refunds_the_attempt(self):
+        self.layout = self.make_repository([self.story()])
+        config = self.layout.config()
+        stop = "import pathlib,time; pathlib.Path('.ajimu-autopilot/runtime/STOP').touch(); time.sleep(40)"
+        config['checks'] = [{'name': 'slow', 'command': f'"{sys.executable}" -c "{stop}"', 'required': True}]
+        write_json_atomic(self.layout.config_path, config)
+        self.scenario(**self.happy())
+        started = time.monotonic()
+        self.assertEqual(runner_module.EXIT_PAUSED, self.runner().run(), self.lines)
+        self.assertLess(time.monotonic() - started, 35, 'the stop must not wait for the check')
+        entry = self.state()['tasks']['T-1']
+        self.assertEqual(('ready', 0, True), (entry['status'], entry['attempts'], entry['interrupted']))
+        self.assertIn('changed', (self.project / 'app.txt').read_text(encoding='utf-8'))
+
+    def test_log_that_cannot_be_deleted_does_not_end_the_run(self):
+        self.layout = self.make_repository([self.story()])
+        config = self.layout.config()
+        config['limits']['keep_session_logs'] = 1
+        write_json_atomic(self.layout.config_path, config)
+        self.scenario(**self.happy())
+        real = Path.unlink
+
+        def held(path, *args, **kwargs):
+            if path.suffix == '.jsonl':
+                raise PermissionError('held by another process')
+            return real(path, *args, **kwargs)
+        with mock.patch.object(Path, 'unlink', held):
+            self.assertEqual(0, self.runner().run(), self.lines)
+
     def test_default_iteration_limit_is_thirty(self):
         self.layout = self.make_repository([self.story()])
         self.assertEqual(30, self.layout.config()['limits']['max_iterations'])
@@ -573,6 +737,17 @@ class RunnerTests(Sandbox):
         worker.base_session = shorten
         worker.run()
         self.assertIn('timed out', self.state()['tasks']['T-1']['findings'][0])
+
+    def test_child_outliving_a_session_does_not_lose_its_result(self):
+        from autopilot_core import claude_cli
+        self.layout = self.make_repository([self.story()])
+        self.scenario(probe=[{'linger': 4, 'structured': {'ack': 'ok'}}])
+        request = claude_cli.SessionRequest(phase='probe', model='sonnet', effort='low', prompt='Return ack.', cwd=str(self.project),
+                                            log_path=str(self.tmp / 'probe.jsonl'), system_append='rules', timeout_seconds=30)
+        result = claude_cli.run_session(self.layout.config()['claude']['command'], request)
+        self.assertEqual({'ack': 'ok'}, result.structured)
+        # The child holds files in this test's folder, which Windows could not delete sooner.
+        time.sleep(5)
 
     def waiting_runner(self, on_sleep=None, **options):
         """A runner whose waits advance a fake clock; returns it and the list of naps taken."""
@@ -669,6 +844,22 @@ class RunnerTests(Sandbox):
         self.assertEqual(runner_module.EXIT_COMPLETE, self.runner().run(), self.lines)
         self.assertEqual(2, len(self.launches('implementation')))
 
+    def test_interrupt_during_a_usage_wait_pauses_and_resume_continues(self):
+        self.layout = self.make_repository([self.story()])
+        phases = self.happy()
+        phases['implementation'].insert(0, {**self.LIMITED, 'edits': self.edit(content='partial\n')})
+        self.scenario(**phases)
+
+        def interrupt():
+            raise KeyboardInterrupt
+        worker, _ = self.waiting_runner(on_sleep=interrupt)
+        self.assertEqual(runner_module.EXIT_PAUSED, worker.run(), self.lines)
+        self.assertEqual('paused', self.state()['run']['status'])
+        self.assertIn('resume', self.lines[-1])
+        self.assertFalse(self.layout.lock_path.exists())
+        self.assertEqual(runner_module.EXIT_COMPLETE, self.runner().run(), self.lines)
+        self.assertEqual(2, len(self.launches('implementation')))
+
     def test_second_runner_is_refused(self):
         self.layout = self.make_repository([self.story()])
         with RunnerLock(self.layout.lock_path):
@@ -725,6 +916,52 @@ class RunnerTests(Sandbox):
         self.assertEqual(0, self.runner().run(), self.lines)
         self.assertEqual(1, self.git('log', '--format=%s').splitlines().count('Add greeting output'))
         self.assertEqual(1, len(self.launches('preflight')), 'the valid preflight is reused')
+
+    def test_crash_during_a_new_preflight_keeps_partial_work_resumable(self):
+        self.layout = self.make_repository([self.story()])
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}],
+                      implementation=[{'edits': self.edit(content='BROKEN\n'), 'structured': done_output()}])
+        self.assertEqual(runner_module.EXIT_LIMIT, self.runner(max_iterations=1).run(), self.lines)
+        plan = self.plan()
+        plan['userStories'][0]['description'] = 'Change the app differently.'
+        prd.save(self.layout.prd_path, plan)
+        worker = self.runner()
+        original = worker.base_session
+
+        class Crash(BaseException):
+            pass
+
+        def crash(phase, *args, **kwargs):
+            if phase == 'preflight':
+                raise Crash()
+            return original(phase, *args, **kwargs)
+        worker.base_session = crash
+        with self.assertRaises(Crash):
+            worker.run()
+        self.layout.lock_path.unlink(missing_ok=True)
+        self.assertEqual('preflight', self.state()['tasks']['T-1']['status'])
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}],
+                      implementation=[{'edits': self.edit(content='fixed\n'), 'structured': done_output()}],
+                      review=[{'structured': review_pass()}])
+        self.assertEqual(0, self.runner().run(), self.lines)
+        self.assertEqual(2, self.state()['tasks']['T-1']['attempts'], 'the earlier attempt still counts')
+
+    def test_block_clears_the_interrupted_mark_with_the_work_set_aside(self):
+        self.layout = self.make_repository([self.story()])
+        phases = self.happy()
+        phases['implementation'].insert(0, {**self.LIMITED, 'edits': self.edit(content='partial\n')})
+        self.scenario(**phases)
+        worker, _ = self.waiting_runner(on_sleep=lambda: runner_module.request_stop(self.project))
+        self.assertEqual(runner_module.EXIT_PAUSED, worker.run(), self.lines)
+        self.assertTrue(self.state()['tasks']['T-1']['interrupted'])
+        runner_module.clear_stop(self.project)
+        plan = self.plan()
+        plan['userStories'][0]['description'] = 'Change the app differently.'
+        prd.save(self.layout.prd_path, plan)
+        self.scenario(preflight=[{'structured': ready_preflight('T-1', outcome='blocked', blocked_reason='Needs a decision')}])
+        self.assertEqual(runner_module.EXIT_BLOCKED, self.runner().run(), self.lines)
+        self.assertFalse(self.state()['tasks']['T-1']['interrupted'])
+        self.assertEqual('base\n', (self.project / 'app.txt').read_text(encoding='utf-8'))
 
     def test_crash_after_commit_before_push_does_not_duplicate(self):
         self.layout = self.make_repository([self.story()])
@@ -796,7 +1033,7 @@ class RunnerTests(Sandbox):
 
     def test_hand_written_ignore_rule_is_respected_and_not_duplicated(self):
         self.layout = self.make_repository([self.story()])
-        (self.project / '.gitignore').write_text('build/\n.ajimu-autopilot/*\n', encoding='utf-8', newline='\n')
+        (self.project / '.gitignore').write_bytes(b'build/\n.ajimu-autopilot/*\n')
         self.git('add', '--all')
         self.git('commit', '--quiet', '-m', 'Ignore the folder by hand')
         self.scenario(**self.happy())
@@ -872,7 +1109,7 @@ class RunnerTests(Sandbox):
         self.assertEqual(0, self.state()['tasks']['T-1']['attempts'])
 
     def test_total_budget_limit_stops_before_new_work(self):
-        self.layout = self.make_repository([self.story()])
+        self.layout = self.make_repository([self.story(), self.story('T-2', priority=2)])
         config = self.layout.config()
         config['limits']['max_budget_usd_total'] = 0.001
         write_json_atomic(self.layout.config_path, config)
@@ -881,6 +1118,15 @@ class RunnerTests(Sandbox):
         self.assertIn('estimated spend', self.lines[-1])
         self.assertTrue(self.launches())
         self.assertEqual(['preflight', 'implementation', 'review'], [e['phase'] for e in self.launches()])
+
+    def test_limit_crossed_by_the_last_task_still_reports_completion(self):
+        self.layout = self.make_repository([self.story()])
+        config = self.layout.config()
+        config['limits']['max_budget_usd_total'] = 0.001
+        write_json_atomic(self.layout.config_path, config)
+        self.scenario(**self.happy())
+        self.assertEqual(runner_module.EXIT_COMPLETE, self.runner().run(), self.lines)
+        self.assertEqual('complete', self.state()['run']['status'])
 
     def test_unblock_requeues_the_task(self):
         self.layout = self.make_repository([self.story()])
@@ -1005,6 +1251,167 @@ class CommandLineTests(Sandbox):
         result = self.cli('setup', '--roadmap', str(outside))
         self.assertEqual(runner_module.EXIT_USAGE, result.returncode)
         self.assertIn('inside the project', result.stderr)
+        result = self.cli('setup', '--roadmap', '../outside.md')
+        self.assertEqual(runner_module.EXIT_USAGE, result.returncode)
+        self.assertIn('inside the project', result.stderr)
+
+    def test_import_roadmap_stores_a_project_relative_source(self):
+        self.make_repository([self.story()])
+        (self.project / 'R.md').write_text('- [ ] A-1 Do it\n', encoding='utf-8')
+        result = self.cli('import-roadmap', '--roadmap', str(self.project / 'R.md'))
+        self.assertEqual(0, result.returncode, result.stderr)
+        plan = json.loads((self.project / 'scripts/ralph/prd.json').read_text(encoding='utf-8'))
+        self.assertEqual('R.md', plan['userStories'][-1]['source']['path'])
+        outside = self.tmp / 'outside.md'
+        outside.write_text('- [ ] B-1 Elsewhere\n', encoding='utf-8')
+        result = self.cli('import-roadmap', '--roadmap', str(outside))
+        self.assertEqual(runner_module.EXIT_USAGE, result.returncode)
+        self.assertIn('inside the project', result.stderr)
+
+    def test_setup_accepts_a_roadmap_with_repeated_lines(self):
+        subprocess.run(['git', 'init', '--quiet', str(self.project)], check=True)
+        (self.project / 'ROADMAP.md').write_text('# A\n\n- [ ] Add tests\n\n# B\n\n- [ ] Add tests\n', encoding='utf-8')
+        result = self.cli('setup')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('imported 2 new tasks', result.stdout)
+        self.assertIn('nothing changed', self.cli('setup').stdout)
+
+    def test_stop_outside_a_configured_project_changes_nothing(self):
+        self.project.mkdir()
+        result = self.cli('stop')
+        self.assertEqual(runner_module.EXIT_USAGE, result.returncode)
+        self.assertIn('not configured', result.stderr)
+        self.assertEqual([], list(self.project.iterdir()))
+        missing = self.tmp / 'missing'
+        result = subprocess.run([sys.executable, str(SCRIPTS / 'autopilot.py'), 'stop', '--project', str(missing)],
+                                capture_output=True, text=True)
+        self.assertEqual(runner_module.EXIT_USAGE, result.returncode)
+        self.assertFalse(missing.exists())
+
+    def test_max_iterations_must_be_positive(self):
+        self.make_repository([self.story()])
+        for value in ('0', '-1'):
+            result = self.cli('run', '--max-iterations', value)
+            self.assertEqual(runner_module.EXIT_USAGE, result.returncode)
+            self.assertIn('positive', result.stderr)
+        self.assertEqual([], self.launches())
+
+    def test_plan_changes_wait_for_an_active_runner(self):
+        layout = self.make_repository([self.story()])
+        (self.project / 'R.md').write_text('- [ ] A-1 Do it\n', encoding='utf-8')
+        before = layout.prd_path.read_bytes()
+        with RunnerLock(layout.lock_path):
+            for args in (('unblock', '--task', 'T-1'), ('import-roadmap', '--roadmap', 'R.md'), ('setup', '--roadmap', 'R.md')):
+                result = self.cli(*args)
+                self.assertEqual(runner_module.EXIT_USAGE, result.returncode, args)
+                self.assertIn('another runner is active', result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+        self.assertEqual(before, layout.prd_path.read_bytes())
+
+    def test_resume_keeps_the_stop_request_of_a_runner_still_active(self):
+        layout = self.make_repository([self.story()])
+        self.assertEqual(0, self.cli('stop').returncode)
+        with RunnerLock(layout.lock_path):
+            result = self.cli('resume')
+        self.assertEqual(runner_module.EXIT_USAGE, result.returncode)
+        self.assertIn('another runner is active', result.stderr)
+        self.assertTrue(layout.stop_path.exists(), 'the active runner still has to stop')
+
+    def test_live_probe_at_a_usage_limit_does_not_mark_a_model_unavailable(self):
+        layout = self.make_repository([self.story()])
+        limited = {'rate_limited': True, 'is_error': True, 'api_error_status': 429}
+        self.scenario(probe=[{'structured': {'ack': 'ok'}}, limited])
+        result = self.cli('validate', '--live')
+        self.assertIn('[warn] live opus', result.stdout)
+        self.assertIn('availability was not measured', result.stdout)
+        self.assertEqual(['sonnet', 'opus'], read_json(layout.capabilities_path)['families'])
+        self.assertEqual([], self.launches('preflight'), 'no preflight is spent while usage is out')
+
+    def test_status_tells_a_dead_runner_from_an_active_one(self):
+        layout = self.make_repository([self.story()])
+        process = subprocess.run([sys.executable, '-c', 'import os; print(os.getpid())'], capture_output=True, text=True)
+        import socket
+        write_json_atomic(layout.lock_path, {'pid': int(process.stdout), 'host': socket.gethostname(), 'started_at': 'x'})
+        write_json_atomic(layout.state_path, {'iteration': 1, 'tasks': {'T-1': {'status': 'running', 'attempts': 1}},
+                                              'run': {'status': 'running'}, 'current_task': 'T-1'})
+        self.assertFalse(json.loads(self.cli('status', '--json').stdout)['runner_active'])
+        self.assertIn('no runner is active', self.cli('status').stdout)
+        layout.lock_path.unlink()
+        with RunnerLock(layout.lock_path):
+            self.assertTrue(json.loads(self.cli('status', '--json').stdout)['runner_active'])
+
+    def test_status_treats_a_task_reopened_by_hand_as_open(self):
+        layout = self.make_repository([self.story()])
+        write_json_atomic(layout.state_path, {'iteration': 1, 'tasks': {'T-1': {'status': 'completed', 'attempts': 1}},
+                                              'run': {'status': 'complete'}, 'current_task': None})
+        status = json.loads(self.cli('status', '--json').stdout)
+        self.assertEqual([], status['completed'])
+        self.assertEqual([{'id': 'T-1', 'status': 'pending'}], status['remaining'])
+
+    def test_malformed_plan_or_checks_are_reported_without_a_traceback(self):
+        layout = self.make_repository([self.story()])
+        good_plan, good_config = layout.prd_path.read_text(encoding='utf-8'), layout.config_path.read_text(encoding='utf-8')
+        for broken in ({'project': 'p', 'branchName': 'b', 'userStories': [self.story(id=['x'])]},
+                       {'project': 'p', 'branchName': 'b', 'userStories': [self.story(dependsOn=5)]},
+                       {'project': 'p', 'branchName': 'b', 'userStories': 5}, [1, 2]):
+            write_json_atomic(layout.prd_path, broken)
+            for args in (('validate',), ('status',), ('preflight', '--task', 'T-1'), ('import-roadmap', '--roadmap', 'check.py'),
+                         ('setup',), ('run',)):
+                with self.subTest(args=args, plan=broken):
+                    result = self.cli(*args)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertNotIn('Traceback', result.stderr)
+        layout.prd_path.write_text(good_plan, encoding='utf-8')
+        config = json.loads(good_config)
+        config['checks'] = ['npm test']
+        write_json_atomic(layout.config_path, config)
+        for args in (('validate',), ('run',), ('preflight', '--task', 'T-1'), ('setup',)):
+            with self.subTest(args=args):
+                result = self.cli(*args)
+                self.assertNotEqual(0, result.returncode)
+                self.assertNotIn('Traceback', result.stderr)
+                self.assertIn('checks must be', result.stdout + result.stderr)
+        result = self.cli('validate', '--live')
+        self.assertIn('live probes', result.stdout)
+        self.assertEqual([], self.launches(), 'nothing is spent on a broken configuration')
+
+    def test_byte_order_mark_in_a_hand_edited_file_is_accepted(self):
+        layout = self.make_repository([self.story()])
+        layout.config_path.write_bytes(b'\xef\xbb\xbf' + layout.config_path.read_bytes())
+        result = self.cli('status')
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_validate_names_task_ids_the_validator_refuses(self):
+        self.make_repository([self.story('AI-3')])
+        result = self.cli('validate')
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn('[FAIL] task IDs in commit messages: AI-3', result.stdout)
+
+    def test_validate_routes_custom_task_types_through_their_override(self):
+        layout = self.make_repository([self.story()])
+        config = layout.config()
+        config['routing']['overrides'] = {'my_type': {'model': 'sonnet', 'effort': 'low'}}
+        write_json_atomic(layout.config_path, config)
+        result = self.cli('validate')
+        self.assertIn('[ok  ] model routing', result.stdout)
+
+    @unittest.skipIf(sys.platform == 'win32', 'TerminateProcess cannot be caught on Windows')
+    def test_termination_signal_ends_the_session_and_pauses(self):
+        layout = self.make_repository([self.story()])
+        self.scenario(preflight=[{'sleep': 60, 'structured': ready_preflight('T-1')}])
+        process = subprocess.Popen([sys.executable, str(SCRIPTS / 'autopilot.py'), 'run', '--project', str(self.project)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic() + 30
+        while not self.launches() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        session = self.launches()[0]['pid']
+        process.terminate()
+        output = process.communicate(timeout=30)
+        self.assertEqual(runner_module.EXIT_PAUSED, process.returncode, output)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(session, 0)
+        self.assertFalse(layout.lock_path.exists())
+        self.assertEqual('paused', read_json(layout.state_path)['run']['status'])
 
     def test_status_survives_titles_the_console_cannot_encode(self):
         self.make_repository([self.story(title='Support \U0001F680 launches')])
@@ -1081,6 +1488,45 @@ class CommandLineTests(Sandbox):
         result = self.cli('preflight', '--task', 'T-1')
         self.assertEqual(runner_module.EXIT_PAUSED, result.returncode, result.stderr + result.stdout)
         self.assertIn('usage or service limit', result.stderr)
+
+    def test_standalone_preflight_refuses_a_closed_task_without_a_traceback(self):
+        layout = self.make_repository([self.story(passes=True), self.story('T-2', priority=2)])
+        write_json_atomic(layout.state_path, {'iteration': 0, 'tasks': {'T-2': {'status': 'blocked', 'attempts': 0}},
+                                              'run': {'status': 'blocked'}, 'current_task': None})
+        for task_id, status in (('T-1', 'completed'), ('T-2', 'blocked')):
+            result = self.cli('preflight', '--task', task_id)
+            self.assertEqual(runner_module.EXIT_USAGE, result.returncode, result.stderr)
+            self.assertIn(status, result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+        self.assertEqual([], self.launches())
+
+    def test_standalone_preflight_recovers_a_crashed_task(self):
+        layout = self.make_repository([self.story()])
+        write_json_atomic(layout.state_path, {'iteration': 1, 'tasks': {'T-1': {'status': 'running', 'attempts': 1}},
+                                              'run': {'status': 'running'}, 'current_task': 'T-1'})
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}])
+        result = self.cli('preflight', '--task', 'T-1')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual('ready', read_json(layout.state_path)['tasks']['T-1']['status'])
+
+    def test_standalone_preflight_reports_a_git_problem_without_a_traceback(self):
+        layout = self.make_repository([self.story()])
+        config = layout.config()
+        config['git']['protected_branches'] = ['autopilot/roadmap']
+        write_json_atomic(layout.config_path, config)
+        result = self.cli('preflight', '--task', 'T-1')
+        self.assertEqual(runner_module.EXIT_ERROR, result.returncode, result.stderr)
+        self.assertIn('protected_branches', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+
+    def test_standalone_preflight_of_a_split_task_is_not_reported_as_blocked(self):
+        self.make_repository([self.story()])
+        children = [{'title': f'Part {n}', 'description': 'Part.', 'acceptanceCriteria': ['Works']} for n in (1, 2)]
+        split = ready_preflight('T-1', outcome='split', split_tasks=children,
+                                corrections=[{'field': 'scope', 'reason': 'too large', 'evidence': 'many files'}])
+        self.scenario(preflight=[{'structured': split}])
+        result = self.cli('preflight', '--task', 'T-1')
+        self.assertEqual(0, result.returncode, result.stderr + result.stdout)
 
     def test_run_stop_resume_and_status_commands(self):
         layout = self.make_repository([self.story()])

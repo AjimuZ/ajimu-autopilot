@@ -98,11 +98,11 @@ class Runner:
         plan = prd_module.load(self.project.prd_path)
         for item in plan['userStories']:
             entry = state['tasks'].setdefault(item['id'], {'status': 'pending', 'attempts': 0})
-            if item['passes'] and entry['status'] not in ('committing', 'pushing'):
-                entry['status'] = 'completed'
-            elif not item['passes'] and entry['status'] == 'completed':
-                # The owner reopened the task by hand; the plan is the authority.
-                entry.update(status='pending', attempts=0)
+            status = effective_status(item, entry['status'])
+            if status == 'pending' and entry['status'] == 'completed':
+                # The owner reopened the task by hand, so it starts over.
+                entry['attempts'] = 0
+            entry['status'] = status
         self.state = state
         return state
 
@@ -149,7 +149,10 @@ class Runner:
     def run(self):
         """Run until done or halted; return the process exit status. Stop files are honored."""
         problems = project_module.validate_config(self.config)
-        problems += prd_module.validate(self.plan())
+        plan = self.plan()
+        problems += prd_module.validate(plan)
+        if self.only_task and not problems and self.only_task not in {item['id'] for item in plan['userStories']}:
+            problems.append(f'unknown task: {self.only_task}')
         if problems:
             self.output('configuration problems:\n- ' + '\n- '.join(problems))
             return EXIT_USAGE
@@ -167,6 +170,10 @@ class Runner:
                 self.log_error(str(error), self.state.get('current_task'))
                 self.finish(EXIT_ERROR, f'critical error: {error}')
                 return EXIT_ERROR
+            except KeyboardInterrupt:
+                # Any session or check already ended with its process tree, and the state says where to go on.
+                self.finish(EXIT_PAUSED, 'interrupted; run "resume" to continue')
+                return EXIT_PAUSED
             return code
 
     def finish(self, code, message):
@@ -177,8 +184,13 @@ class Runner:
         self.output(message)
 
     def prepare(self):
-        """Verify the preconditions of unattended work, then recover any interrupted task."""
+        """Verify the preconditions of unattended work, then recover any interrupted task.
+
+        The iteration count restarts here because the limit applies to one run: `resume`
+        has to be able to continue after reaching it.
+        """
         self.state['run'] = {'status': 'running', 'started_at': utc_now()}
+        self.state['iteration'] = 0
         self.deadline = time.monotonic() + self.config['limits']['global_timeout_minutes'] * 60
         self.command = claude_cli.find_claude(self.config['claude'].get('command'), self.base_env)
         if not self.command:
@@ -188,6 +200,9 @@ class Runner:
             raise Halt(EXIT_ERROR, f'ajimu-conventions is not installed. Install it with: {conventions.INSTALL_HINT}')
         if not self.git.is_repository() or not self.git.has_commits():
             raise Halt(EXIT_ERROR, 'the project must be a Git repository with at least one commit')
+        if not self.git.is_root():
+            # Ownership rules, the change scan and roadmap edits all read paths from the top of the repository.
+            raise Halt(EXIT_ERROR, f'{self.project.root} is not the root of its Git repository; configure the project there')
         if not all(self.git.identity()):
             raise Halt(EXIT_ERROR, 'Git identity is not configured; the runner will not invent one')
         if not self.config['checks']:
@@ -195,7 +210,10 @@ class Runner:
         git_config = self.config['git']
         if not self.git.remote_url(git_config['remote']):
             raise Halt(EXIT_ERROR, f'remote "{git_config["remote"]}" is not configured')
-        self.git.remote_head(git_config['remote'], git_config['branch'])
+        try:
+            self.git.remote_head(git_config['remote'], git_config['branch'])
+        except gitops.GitError as error:
+            raise self.remote_halt(error) from error
         interrupted = self.recover_states()
         foreign = self.git.foreign_changes()
         if foreign and not interrupted:
@@ -219,17 +237,26 @@ class Runner:
         task's push would.
         """
         remote, branch = self.config['git']['remote'], self.config['git']['branch']
-        remote_sha = self.git.remote_head(remote, branch)
-        if not remote_sha or remote_sha == self.git.head():
-            return
-        self.git.run('fetch', remote, f'refs/heads/{branch}:refs/remotes/{remote}/{branch}', timeout=300)
-        if self.git.is_ancestor(remote_sha, 'HEAD'):
-            self.git.push(remote, branch)
-            self.output(f'published local commits already on {branch}')
-        elif self.git.is_ancestor('HEAD', remote_sha):
+        try:
+            remote_sha = self.git.remote_head(remote, branch)
+            if not remote_sha or remote_sha == self.git.head():
+                return
+            self.git.fetch_tracking(remote, branch)
+            if self.git.is_ancestor(remote_sha, 'HEAD'):
+                self.git.push(remote, branch)
+                self.output(f'published local commits already on {branch}')
+                return
+        except gitops.GitError as error:
+            raise self.remote_halt(error) from error
+        if self.git.is_ancestor('HEAD', remote_sha):
             raise Halt(EXIT_ERROR, f'{branch} is behind {remote}/{branch}. Update it by hand, then resume')
-        else:
-            raise Halt(EXIT_ERROR, f'{branch} has diverged from {remote}/{branch}. Resolve it by hand, then resume')
+        raise Halt(EXIT_ERROR, f'{branch} has diverged from {remote}/{branch}. Resolve it by hand, then resume')
+
+    def remote_halt(self, error):
+        """Return the pause for an unreachable or refusing remote: nothing is lost and `resume` retries."""
+        self.log_error(f'remote problem: {error}', self.state.get('current_task'))
+        return Halt(EXIT_PAUSED, f'the remote could not be reached or refused the push: {error}\n'
+                                 'Fix the remote problem, then run "resume"; local commits are safe.')
 
     def publish_metadata_removal(self):
         """Commit and push the ignore rule and the untracking of old metadata, on their own.
@@ -248,15 +275,18 @@ class Runner:
     def recover_states(self):
         """Return True when a task was interrupted mid-flight and may own working-tree changes.
 
-        A task caught in `preflight` restarts it. One caught in `running` or `verification`
-        returns to `ready` with its partial work left in place. The commit and push stages
-        are resolved by comparing Git with the recorded state in `sync_published_work`.
+        A task caught in `preflight` restarts it, and goes back to `ready` if an earlier
+        attempt left work in the tree. One caught in `running` or `verification` returns
+        to `ready` with its partial work left in place. The commit and push stages are
+        resolved by comparing Git with the recorded state in `sync_published_work`.
         """
         interrupted = False
         for task_id, entry in self.state['tasks'].items():
             status = entry['status']
             if status == 'preflight':
-                entry['status'] = 'pending'
+                has_work = bool(entry.get('attempts') or entry.get('interrupted'))
+                entry['status'] = 'ready' if has_work else 'pending'
+                interrupted = interrupted or has_work
             elif status in ('running', 'verification'):
                 entry.update(status='ready', interrupted=True)
                 interrupted = True
@@ -283,6 +313,7 @@ class Runner:
         self.conventions = conventions.locate(self.project.root)
         if not self.conventions:
             raise Halt(EXIT_ERROR, f'ajimu-conventions is not installed. Install it with: {conventions.INSTALL_HINT}')
+        self.recover_states()
         git_config = self.config['git']
         self.git.ensure_branch(git_config['branch'], git_config['remote'], git_config['protected_branches'])
         self.load_capabilities()
@@ -297,12 +328,13 @@ class Runner:
     def loop(self):
         while True:
             self.sync_published_work()
-            self.check_limits()
             plan = self.plan()
             statuses = self.statuses()
             item = self.next_task(plan, statuses)
             if item is None:
                 return self.conclude(plan, statuses)
+            # After the check for remaining work, so that a last task crossing a limit still reads as complete.
+            self.check_limits()
             if self.state['iteration'] >= self.max_iterations:
                 message = f'iteration limit reached ({self.max_iterations}); run "resume" to continue'
                 self.finish(EXIT_LIMIT, message)
@@ -335,10 +367,13 @@ class Runner:
         self.state['run'].update(status='waiting', message=message)
         self.save_state()
         self.output(message)
-        while self.clock() < until:
+        while True:
+            remaining = until - self.clock()
+            if remaining <= 0:
+                break
             if self.stop_requested():
                 raise Halt(EXIT_PAUSED, 'stop requested while waiting for usage; run "resume" to continue')
-            self.sleep(min(WAIT_TICK_SECONDS, until - self.clock()))
+            self.sleep(min(WAIT_TICK_SECONDS, remaining))
         self.deadline += self.clock() - now
         self.state['run'].update(status='running', message=None)
         self.save_state()
@@ -379,7 +414,11 @@ class Runner:
         keep = self.config['limits'].get('keep_session_logs', 40)
         logs = sorted(self.project.logs_dir.glob('*.jsonl'), key=lambda path: path.stat().st_mtime)
         for path in logs[:-keep] if keep else []:
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # A viewer or an antivirus can hold a log on Windows. The next pass retries; no log is worth a run.
+                continue
 
     # ---- one task -------------------------------------------------------------------
 
@@ -388,6 +427,12 @@ class Runner:
         limit = 1 + self.config['limits']['max_fix_attempts']
         if entry.get('attempts', 0) >= limit:
             self.block(task_id, f'still failing after {limit} attempts: {"; ".join(entry.get("findings") or [])[:800]}')
+            return
+        accepted, detail = self.check_message(f'Keep the plan current\n\nTask: {task_id}\n')
+        if not accepted:
+            # Every commit of this task needs this line, so no attempt could ever be committed.
+            self.block(task_id, f'the ID {task_id} cannot appear in a commit message; '
+                                f'rename the task, keeping its source: {detail}')
             return
         record = self.load_record(task_id)
         item = prd_module.story(self.plan(), task_id)
@@ -552,7 +597,7 @@ class Runner:
         entry = self.entry(task_id)
         attempt = entry.get('attempts', 0) + 1
         resuming = bool(entry.get('interrupted'))
-        self.transition(task_id, 'running', attempts=attempt, base_commit=head, interrupted=False)
+        self.transition(task_id, 'running', attempts=attempt, base_commit=head, interrupted=False, metadata_only=False)
         ack = secrets.token_hex(8)
         protected = self.snapshot_owned()
         execution = {'attempt': attempt, 'started_at': utc_now(), 'selected_model': model, 'selected_effort': decision['effort'],
@@ -563,6 +608,7 @@ class Runner:
                                                self.implementation_prompt(item, record, resuming), 'implementation', WRITE_TOOLS,
                                                self.write_allow(), (), ack=ack)
         except Halt as halt:
+            self.restore_owned(protected, task_id)
             self.refund_attempt(task_id, halt)
             raise
         self.restore_owned(protected, task_id)
@@ -708,8 +754,8 @@ class Runner:
         findings = []
         roadmap_path = (item.get('source') or {}).get('path')
         if roadmap_path and (self.project.root / roadmap_path).is_file():
-            if not prd_module.siblings_open(self.plan(), item):
-                prd_module.tick_roadmap(self.project.root, item)
+            if not prd_module.siblings_open(self.plan(), item) and not prd_module.tick_roadmap(self.project.root, item):
+                # The session may have reworded the line while updating the document, which is enough.
                 posix = {path.replace('\\', '/') for path in self.git.foreign_changes()}
                 if roadmap_path not in posix:
                     findings.append(f'the roadmap line for this task was not found in {roadmap_path}; update that '
@@ -832,15 +878,15 @@ class Runner:
         git_config = self.config['git']
         remote, branch = git_config['remote'], git_config['branch']
         commit = entry.get('commit') or self.git.head()
-        if not self.git.is_published(remote, branch, commit):
-            try:
+        try:
+            if not self.git.is_published(remote, branch, commit):
                 self.git.push(remote, branch)
-            except gitops.GitError as error:
-                entry['push_error'] = str(error)[:800]
-                self.save_state()
-                self.log_error(f'push failed: {error}', task_id)
-                raise Halt(EXIT_PAUSED, f'{task_id}: committed locally as {commit[:10]} but not published: {error}\n'
-                                        'Fix the remote problem, then run "resume"; the commit is safe.') from error
+        except gitops.GitError as error:
+            entry['push_error'] = str(error)[:800]
+            self.save_state()
+            self.log_error(f'push failed: {error}', task_id)
+            raise Halt(EXIT_PAUSED, f'{task_id}: committed locally as {commit[:10]} but not published: {error}\n'
+                                    'Fix the remote problem, then run "resume"; the commit is safe.') from error
         self.transition(task_id, 'completed', pushed_commit=commit, pushed_at=utc_now(), push_error=None)
         self.state['last_commit'] = commit
         self.state['last_push'] = {'commit': commit, 'at': utc_now(), 'branch': branch, 'task': task_id}
@@ -870,9 +916,14 @@ class Runner:
         return self.commit_and_publish(subject, task_id)
 
     def commit_and_publish(self, subject, task_id=None):
-        """Commit the index under a validated subject and push it; return the commit."""
-        message = subject + '\n'
-        accepted, detail = self.check_message(message)
+        """Commit the index under a validated subject and push it; return the commit.
+
+        A task ID can hold a word the validator refuses. A plan record does not need the
+        ID, so a generic subject replaces it rather than a refusal ending the run.
+        """
+        accepted, detail = self.check_message(subject + '\n')
+        if not accepted and task_id:
+            accepted, detail = self.check_message('Record plan changes\n')
         if not accepted:
             raise Halt(EXIT_ERROR, f'internal commit message rejected: {detail}')
         try:
@@ -900,7 +951,8 @@ class Runner:
         plan = self.plan()
         prd_module.story(plan, task_id)['notes'] = f'BLOCKED: {reason}'[:600]
         prd_module.save(self.project.prd_path, plan)
-        self.transition(task_id, 'blocked', blocked_reason=reason, preserved_commit=preserved)
+        # Interrupted work has just been set aside, so a later attempt must not be told to continue from it.
+        self.transition(task_id, 'blocked', blocked_reason=reason, preserved_commit=preserved, interrupted=False)
         self.log_error(f'blocked: {reason}', task_id)
         self.output(f'{task_id}: BLOCKED: {reason}')
         self.checkpoint(f'Record blocked task {task_id}', task_id)
@@ -944,10 +996,19 @@ def summarize_checks(report):
     return [{key: check[key] for key in ('name', 'passed', 'exit_code')} for check in report.get('results', [])]
 
 
+def effective_status(item, status):
+    """Return a task's status once prd.json, the authority on completion, is taken into account.
+
+    Only a commit or push still in progress outranks it. A task marked open again by hand
+    is pending, whatever the state file remembers.
+    """
+    if item['passes'] and status not in ('committing', 'pushing'):
+        return 'completed'
+    return 'pending' if not item['passes'] and status == 'completed' else status
+
+
 def request_stop(root):
-    project = project_module.Project(root)
-    project.ensure_runtime()
-    write_text_atomic(project.stop_path, utc_now() + '\n')
+    write_text_atomic(project_module.Project(root).stop_path, utc_now() + '\n')
 
 
 def clear_stop(root):
@@ -955,14 +1016,19 @@ def clear_stop(root):
 
 
 def unblock(root, task_id):
-    """Return a blocked task to the queue with fresh attempts. Raises KeyError for unknown tasks."""
+    """Return a blocked task to the queue with fresh attempts.
+
+    Raises KeyError for unknown tasks and LockHeld while a runner is active, because its
+    next save would discard this change.
+    """
     project = project_module.Project(root)
-    state = read_json(project.state_path) or {}
-    entry = (state.get('tasks') or {}).get(task_id)
-    if not entry or entry.get('status') != 'blocked':
-        raise KeyError(f'{task_id} is not blocked')
-    entry.update(status='pending', attempts=0, findings=[], blocked_reason=None)
-    write_json_atomic(project.state_path, state)
-    plan = prd_module.load(project.prd_path)
-    prd_module.story(plan, task_id)['notes'] = ''
-    prd_module.save(project.prd_path, plan)
+    with RunnerLock(project.lock_path):
+        state = read_json(project.state_path) or {}
+        entry = (state.get('tasks') or {}).get(task_id)
+        if not entry or entry.get('status') != 'blocked':
+            raise KeyError(f'{task_id} is not blocked')
+        entry.update(status='pending', attempts=0, findings=[], blocked_reason=None)
+        write_json_atomic(project.state_path, state)
+        plan = prd_module.load(project.prd_path)
+        prd_module.story(plan, task_id)['notes'] = ''
+        prd_module.save(project.prd_path, plan)

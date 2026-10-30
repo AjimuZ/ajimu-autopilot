@@ -24,7 +24,8 @@ commits on it go out too, at the start of the run.
 1. Require a clean start: uncommitted project changes with no interrupted task stop the run.
 2. Session implements. The runner checks that the branch and `HEAD` did not move.
 3. Run checks, scan the change, tick the roadmap, run the review.
-4. Validate the message: subject, optional body, and an exact `Task: <ID>` line.
+4. Validate the message: subject, optional body, and an exact `Task: <ID>` line. An ID the
+   validator refuses blocks the task before any session runs, and `validate` names it.
 5. Set `passes`, write progress, `git add --all` (honoring `.gitignore`), refuse sensitive
    paths, and commit with hooks active.
 6. `git push --set-upstream origin <branch>`, then confirm with `git ls-remote` that the
@@ -46,7 +47,7 @@ safe locally and no new task starts. `status` shows the last confirmed push.
 | Push problem | Behavior |
 | --- | --- |
 | Remote unreachable or rejected | Commit kept, status `pushing`, exit 3. `resume` retries |
-| Local is ahead on restart | Pushed before new work |
+| Local is ahead on restart | Pushed before new work; a refusal is exit 3 again |
 | Local is behind or diverged | Run stops with a message. Never rebased or forced |
 
 ## Never done

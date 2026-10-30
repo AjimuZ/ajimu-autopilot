@@ -45,6 +45,10 @@ class Git:
     def has_commits(self):
         return self.ok('rev-parse', '--verify', 'HEAD')
 
+    def is_root(self):
+        """Tell whether this folder is the repository's top level, which status paths are relative to."""
+        return self.run('rev-parse', '--show-prefix', check=False) == ''
+
     def head(self):
         return self.run('rev-parse', 'HEAD')
 
@@ -126,7 +130,7 @@ class Git:
             return False
         remote_sha = self.remote_head(remote, name)
         if remote_sha:
-            self.run('fetch', remote, f'refs/heads/{name}:refs/remotes/{remote}/{name}')
+            self.fetch_tracking(remote, name)
             self.run('switch', '-c', name, '--track', f'{remote}/{name}')
             return False
         self.run('switch', '-c', name)
@@ -139,6 +143,14 @@ class Git:
         """Return the remote branch's commit, or None when absent. Raises GitError when unreachable."""
         output = self.run('ls-remote', '--heads', remote, f'refs/heads/{branch}', timeout=120)
         return output.split()[0] if output else None
+
+    def fetch_tracking(self, remote, branch):
+        """Update the remote-tracking ref and nothing else.
+
+        The `+` lets that ref follow rewritten remote history, as Git's default refspec does.
+        The local branch stays where it is, and the caller reports the divergence.
+        """
+        self.run('fetch', remote, f'+refs/heads/{branch}:refs/remotes/{remote}/{branch}', timeout=300)
 
     def is_ancestor(self, older, newer):
         return self.ok('merge-base', '--is-ancestor', older, newer)
@@ -231,12 +243,24 @@ class Git:
         return sha
 
     def added_lines(self):
-        """Return (path, added line) for tracked changes against HEAD."""
-        diff = self.run('diff', 'HEAD', '--unified=0', '--no-color', '--no-ext-diff', timeout=120)
-        path, added = None, []
-        for line in diff.splitlines():
-            if line.startswith('+++ '):
-                path = line[6:] if line.startswith('+++ b/') else None
+        """Return (path, added line) for tracked changes against HEAD.
+
+        The prefixes are fixed because diff.noprefix and diff.mnemonicPrefix would change
+        them, and quoting is off for non-ASCII names, either of which would hide a file from
+        the scan. A file name is read only from the header after `diff --git`, because an
+        added line can also start with `+++ `.
+        """
+        diff = self.run('-c', 'core.quotepath=off', 'diff', 'HEAD', '--unified=0', '--no-color', '--no-ext-diff',
+                        '--src-prefix=a/', '--dst-prefix=b/', timeout=120)
+        path, added, in_header = None, [], False
+        for line in diff.split('\n'):
+            if line.startswith('diff --git '):
+                path, in_header = None, True
+            elif in_header:
+                if line.startswith('+++ '):
+                    # Git still quotes names with special characters, and ends names with spaces in a tab.
+                    name = line[4:].rstrip('\t').strip('"')
+                    path, in_header = name[2:] if name.startswith('b/') else None, False
             elif line.startswith('+') and path:
                 added.append((path, line[1:]))
         return added

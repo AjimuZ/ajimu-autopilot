@@ -50,7 +50,8 @@ restricted, Claude Code 2.1.314 ran `--model haiku` on `claude-opus-5-5` with no
 ## Opus availability
 
 `validate --live` launches a short session per family and counts a family as available only
-if its own usage reports it. The result is cached in `runtime/capabilities.json`. When Opus
+if its own usage reports it, or if a usage limit kept the probe from measuring it. The result
+is cached in `runtime/capabilities.json`. When Opus
 is required but unavailable, Sonnet is used with at least `high` effort if the preflight
 judged it sufficient; otherwise the task is blocked. Without a probe, all families are
 assumed available and a substitution is caught after the session.

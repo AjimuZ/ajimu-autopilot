@@ -7,6 +7,7 @@ resumable, 4 only blocked tasks remain, 5 a limit was reached.
 """
 import argparse
 import json
+import signal
 import sys
 from pathlib import Path
 
@@ -15,11 +16,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from autopilot_core import __version__, doctor, gitops, preflight, project as project_module, roadmap, routing  # noqa: E402
 from autopilot_core import prd as prd_module  # noqa: E402
 from autopilot_core import runner as runner_module  # noqa: E402
-from autopilot_core.store import LockHeld, read_json  # noqa: E402
+from autopilot_core.store import LockHeld, RunnerLock, read_json  # noqa: E402
+
+
+def configured_project(root):
+    """Return the project at `root`, or raise FileNotFoundError before anything is created there."""
+    project = project_module.Project(root)
+    if not project.is_configured():
+        raise FileNotFoundError(f'{project.root} is not configured; run setup there, or pass --project')
+    return project
 
 
 def command_setup(args):
-    report = project_module.setup(args.project, args.roadmap, args.branch, args.remote)
+    with RunnerLock(project_module.Project(args.project).lock_path):
+        report = project_module.setup(args.project, args.roadmap, args.branch, args.remote)
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0
@@ -37,11 +47,12 @@ def command_setup(args):
 
 
 def command_import(args):
-    project = project_module.Project(args.project)
-    plan = prd_module.load(project.prd_path)
-    stories, summary = roadmap.parse_file(project.root, args.roadmap)
-    added = roadmap.merge(plan, stories)
-    prd_module.save(project.prd_path, plan)
+    project = configured_project(args.project)
+    with RunnerLock(project.lock_path):
+        plan = prd_module.load_valid(project.prd_path)
+        stories, summary = roadmap.parse_file(project.root, project_module.project_relative(project.root, args.roadmap))
+        added = roadmap.merge(plan, stories)
+        prd_module.save(project.prd_path, plan)
     print(json.dumps({**summary, 'added': added}, indent=2, ensure_ascii=False))
     return 0
 
@@ -53,20 +64,18 @@ def command_validate(args):
 
 
 def _run(args, resume):
-    if not resume and project_module.Project(args.project).stop_path.exists():
+    project = project_module.Project(args.project)
+    if not resume and project.stop_path.exists():
         print('a stop request is pending; use "resume" to clear it and continue', file=sys.stderr)
         return runner_module.EXIT_USAGE
     if resume:
+        # Checked first, because clearing the request of a runner still at work would cancel its stop.
+        lock = RunnerLock(project.lock_path)
+        if lock.is_active():
+            raise LockHeld(lock.owner())
         runner_module.clear_stop(args.project)
-    try:
-        worker = runner_module.Runner(args.project, max_iterations=args.max_iterations, only_task=args.task)
-        return worker.run()
-    except LockHeld as held:
-        print(f'{held}\nUse "status" to watch it or "stop" to end it.', file=sys.stderr)
-        return runner_module.EXIT_USAGE
-    except FileNotFoundError as error:
-        print(f'{error}', file=sys.stderr)
-        return runner_module.EXIT_USAGE
+    worker = runner_module.Runner(args.project, max_iterations=args.max_iterations, only_task=args.task)
+    return worker.run()
 
 
 def command_run(args):
@@ -78,14 +87,15 @@ def command_resume(args):
 
 
 def command_stop(args):
-    runner_module.request_stop(args.project)
+    # A stop written anywhere else would be reported as done while the real runner carries on.
+    runner_module.request_stop(configured_project(args.project).root)
     print('stop requested; the runner ends its current session and saves its state')
     return 0
 
 
 def command_unblock(args):
     try:
-        runner_module.unblock(args.project, args.task)
+        runner_module.unblock(configured_project(args.project).root, args.task)
     except KeyError as error:
         print(error.args[0], file=sys.stderr)
         return runner_module.EXIT_USAGE
@@ -107,35 +117,42 @@ def command_route(args):
 def command_preflight(args):
     """Run the preflight of one task, on its own and without implementing anything."""
     worker = runner_module.Runner(args.project)
-    if args.task not in {item['id'] for item in worker.plan()['userStories']}:
+    plan = worker.plan()
+    problems = project_module.validate_config(worker.config) + prd_module.validate(plan)
+    if problems:
+        print('configuration problems:\n- ' + '\n- '.join(problems), file=sys.stderr)
+        return runner_module.EXIT_USAGE
+    if args.task not in {item['id'] for item in plan['userStories']}:
         print(f'unknown task: {args.task}', file=sys.stderr)
         return runner_module.EXIT_USAGE
     try:
-        with runner_module.RunnerLock(worker.project.lock_path):
+        with RunnerLock(worker.project.lock_path):
             worker.load_state()
+            status = worker.entry(args.task)['status']
+            if status in ('completed', 'committing', 'pushing', 'blocked'):
+                print(f'{args.task} is {status}; a preflight applies only to an open task. '
+                      f'{"Use unblock first." if status == "blocked" else ""}'.strip(), file=sys.stderr)
+                return runner_module.EXIT_USAGE
             worker.prepare_for_single_phase()
-            passed = worker.run_preflight(args.task)
+            worker.run_preflight(args.task)
     except runner_module.Halt as halt:
         print(halt.message, file=sys.stderr)
         return halt.code
-    except LockHeld as held:
-        print(held, file=sys.stderr)
-        return runner_module.EXIT_USAGE
     print(json.dumps(worker.load_record(args.task).get('preflight'), indent=2, ensure_ascii=False))
-    return 0 if passed else runner_module.EXIT_BLOCKED
+    # A split or a verified "already implemented" also ends without a `ready` task, and neither is a block.
+    return runner_module.EXIT_BLOCKED if (worker.state['tasks'].get(args.task) or {}).get('status') == 'blocked' else 0
 
 
 def build_status(root):
     """Collect everything the monitor shows from files only; works while a run is active."""
     project = project_module.Project(root)
-    plan = prd_module.load(project.prd_path)
+    plan = prd_module.load_valid(project.prd_path)
     state = read_json(project.state_path) or {'tasks': {}, 'run': {'status': 'never started'}, 'iteration': 0}
     config = project.config()
     tasks, completed, remaining, blocked = {}, [], [], []
     for item in plan['userStories']:
         entry = state['tasks'].get(item['id']) or {}
-        status = 'completed' if item['passes'] and entry.get('status') not in ('committing', 'pushing') \
-            else entry.get('status', 'pending')
+        status = runner_module.effective_status(item, entry.get('status', 'pending'))
         tasks[item['id']] = status
         if status == 'completed':
             completed.append(item['id'])
@@ -167,10 +184,11 @@ def build_status(root):
                 errors.append(json.loads(line))
             except ValueError:
                 continue
-    lock = read_json(project.lock_path) if project.lock_path.is_file() else None
     git = gitops.Git(project.root)
     return {
-        'run': state.get('run'), 'runner_active': bool(lock), 'stop_requested': project.stop_path.exists(),
+        # Asked of the lock's owner, because a crash leaves both the lock and a `running` state behind.
+        'run': state.get('run'), 'runner_active': RunnerLock(project.lock_path).is_active(),
+        'stop_requested': project.stop_path.exists(),
         'iteration': state.get('iteration', 0), 'max_iterations': config['limits']['max_iterations'],
         'current_task': current, 'completed': completed, 'remaining': remaining, 'blocked': blocked,
         'selection': selected, 'latest_checks': latest_checks, 'last_commit': state.get('last_commit') or
@@ -189,8 +207,9 @@ def command_status(args):
         print(json.dumps(status, indent=2, ensure_ascii=False))
         return 0
     run = status['run'] or {}
-    print(f'run: {run.get("status")}{" (active)" if status["runner_active"] else ""}'
-          f'{" - " + run["message"] if run.get("message") else ""}')
+    activity = (' (active)' if status['runner_active'] else
+                ' (no runner is active; "resume" continues)' if run.get('status') in ('running', 'waiting') else '')
+    print(f'run: {run.get("status")}{activity}{" - " + run["message"] if run.get("message") else ""}')
     print(f'iteration: {status["iteration"]}/{status["max_iterations"]}; estimated spend: {status["spent_usd_estimate"]} USD')
     print(f'completed: {len(status["completed"])}  remaining: {len(status["remaining"])}  blocked: {len(status["blocked"])}')
     if status['current_task']:
@@ -210,6 +229,13 @@ def command_status(args):
     for error in status['recent_errors']:
         print(f'error: {error["at"]} {error.get("task") or ""}: {error["message"][:200]}')
     return 0
+
+
+def positive_int(text):
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return value
 
 
 def build_parser():
@@ -236,7 +262,7 @@ def build_parser():
     for name, handler, text in (('run', command_run, 'Start the autonomous loop.'),
                                 ('resume', command_resume, 'Clear a stop request and continue an interrupted run.')):
         sub = add(name, handler, text)
-        sub.add_argument('--max-iterations', type=int, help='override limits.max_iterations for this run')
+        sub.add_argument('--max-iterations', type=positive_int, help='override limits.max_iterations for this run')
         sub.add_argument('--task', help='work only on this task')
     add('stop', command_stop, 'Ask the active runner to stop safely.')
     sub = add('status', command_status, 'Show tasks, iteration, selection, checks, commit, push and errors.')
@@ -254,17 +280,34 @@ def build_parser():
     return parser
 
 
+def interrupt(*_):
+    raise KeyboardInterrupt
+
+
 def main(argv=None):
     # Task titles can hold characters a Windows console cannot encode, which must not end a run.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, 'reconfigure'):
             stream.reconfigure(errors='replace')
+    # A closed terminal or a `kill` must end the running session too, as Ctrl+C does, instead of orphaning it.
+    for name in ('SIGTERM', 'SIGHUP', 'SIGBREAK'):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), interrupt)
     args = build_parser().parse_args(argv)
     try:
         return args.handler(args)
+    except LockHeld as held:
+        print(f'{held}\nUse "status" to watch it or "stop" to end it.', file=sys.stderr)
+        return runner_module.EXIT_USAGE
+    except KeyboardInterrupt:
+        print('interrupted', file=sys.stderr)
+        return runner_module.EXIT_PAUSED
     except (FileNotFoundError, ValueError) as error:
         print(f'error: {error}', file=sys.stderr)
         return runner_module.EXIT_USAGE
+    except (RuntimeError, OSError) as error:
+        print(f'error: {error}', file=sys.stderr)
+        return runner_module.EXIT_ERROR
 
 
 if __name__ == '__main__':

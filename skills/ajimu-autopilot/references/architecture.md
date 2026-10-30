@@ -44,6 +44,7 @@ Illegal transitions raise an error. State is written before each risky step.
 | `prd.py` | Plan rules, versioning, selection, corrections, splits |
 | `roadmap.py` | Markdown roadmap import |
 | `claude_cli.py` | Session launch, environment, and reading what really ran |
+| `processes.py` | Ending a session or check together with everything it started |
 | `gitops.py` | The only Git operations allowed |
 | `quality.py` | Check execution, secret and disabled-test scan |
 | `conventions.py` | Locating Ajimu Conventions and its validator |

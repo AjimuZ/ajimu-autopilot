@@ -1,15 +1,17 @@
 """Package checks: valid skill, working installer, clean sources, safe prompt rendering."""
 import ast
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from support import ROOT, SCRIPTS, SKILL
-from autopilot_core import conventions, preflight, project as project_module, quality, routing
+from autopilot_core import conventions, doctor, preflight, processes, project as project_module, quality, routing
 
 REQUIRED_REFERENCES = ('architecture', 'project-analysis', 'roadmap', 'task-preflight', 'model-routing',
                        'ralph-integration', 'persistent-memory', 'ajimu-conventions', 'git-workflow', 'safety')
@@ -133,6 +135,16 @@ class ConventionsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             self.assertIsNone(conventions.locate(None, home))
 
+    def test_newest_install_in_the_plugin_cache_wins(self):
+        with tempfile.TemporaryDirectory() as home:
+            for stamp, version in enumerate(('1.0.0', '1.2.0', '1.10.0'), 1000):
+                folder = Path(home) / '.claude/plugins/cache/market/ajimu-conventions' / version / 'skills' / conventions.SKILL
+                (folder / 'scripts').mkdir(parents=True)
+                (folder / 'SKILL.md').write_text(version, encoding='utf-8')
+                (folder / conventions.VALIDATOR).write_text('import sys; sys.exit(0)', encoding='utf-8')
+                os.utime(folder / 'SKILL.md', (stamp, stamp))
+            self.assertEqual('1.10.0', conventions.locate(None, home).text)
+
     @unittest.skipUnless(conventions.locate(), 'ajimu-conventions is not installed')
     def test_the_official_validator_decides(self):
         found = conventions.locate()
@@ -142,6 +154,94 @@ class ConventionsTests(unittest.TestCase):
             self.assertTrue(conventions.check_message(found, path)[0])
             path.write_text('Keep drafts\n\nCo-Authored-By: A <a@example.invalid>\n', encoding='utf-8')
             self.assertFalse(conventions.check_message(found, path)[0])
+
+    @unittest.skipUnless(conventions.locate(), 'ajimu-conventions is not installed')
+    def test_task_ids_the_validator_refuses_are_named(self):
+        found = conventions.locate()
+        self.assertEqual([], conventions.refused_task_ids(found, ['P01.1', 'RM-abcd1234']))
+        self.assertEqual(['AI-3'], conventions.refused_task_ids(found, ['P01.1', 'AI-3']))
+
+
+class ProcessTests(unittest.TestCase):
+    def sleeper(self):
+        return subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], **processes.GROUP_OPTIONS)
+
+    def test_outcomes_of_a_bounded_wait(self):
+        finished = subprocess.Popen([sys.executable, '-c', ''], **processes.GROUP_OPTIONS)
+        self.assertEqual('exited', processes.wait_bounded(finished, 60))
+        timed_out = self.sleeper()
+        self.assertEqual('timed_out', processes.wait_bounded(timed_out, 1))
+        self.assertIsNotNone(timed_out.poll())
+        stopped = self.sleeper()
+        self.assertEqual('stopped', processes.wait_bounded(stopped, 60, lambda: True))
+        self.assertIsNotNone(stopped.poll())
+
+    def test_an_interrupt_while_waiting_ends_the_process(self):
+        def interrupt():
+            raise KeyboardInterrupt
+        process = self.sleeper()
+        with self.assertRaises(KeyboardInterrupt):
+            processes.wait_bounded(process, 60, interrupt)
+        self.assertIsNotNone(process.poll())
+
+
+class CheckTests(unittest.TestCase):
+    def check(self, source):
+        return {'name': 'c', 'command': f'"{sys.executable}" -c "{source}"'}
+
+    def test_timeout_ends_the_descendants_of_the_shell(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            started = time.monotonic()
+            report = quality.run_checks(
+                scratch, [self.check("import pathlib,time; print('begun', flush=True); time.sleep(5); pathlib.Path('m').touch()")], 1)
+            self.assertLess(time.monotonic() - started, 4.5, 'the wait must not outlast the timeout')
+            result = report['results'][0]
+            self.assertEqual((False, None), (result['passed'], result['exit_code']))
+            self.assertIn('timed out', result['output_tail'])
+            self.assertIn('begun', result['output_tail'])
+            time.sleep(5)
+            self.assertFalse((Path(scratch) / 'm').exists(), 'the check went on after its timeout')
+
+    def test_stop_request_ends_a_running_check(self):
+        answers = iter((False, False, True))
+        with tempfile.TemporaryDirectory() as scratch:
+            started = time.monotonic()
+            report = quality.run_checks(scratch, [self.check('import time; time.sleep(30)')], 60, lambda: next(answers))
+            self.assertLess(time.monotonic() - started, 15)
+        self.assertTrue(report['stopped'])
+        self.assertEqual([], report['results'])
+
+    def test_output_keeps_both_streams_and_the_exit_code(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            report = quality.run_checks(scratch, [self.check("import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)")], 60)
+        result = report['results'][0]
+        self.assertEqual((False, 3), (result['passed'], result['exit_code']))
+        self.assertIn('out', result['output_tail'])
+        self.assertIn('err', result['output_tail'])
+        self.assertFalse(report['ok'])
+
+    def test_a_check_reading_input_is_not_left_waiting(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            report = quality.run_checks(scratch, [self.check('import sys; sys.exit(0 if sys.stdin.read() == str() else 1)')], 20)
+        self.assertTrue(report['results'][0]['passed'], report)
+
+
+class SettingsTests(unittest.TestCase):
+    def test_settings_file_that_is_not_an_object_is_ignored(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / '.claude').mkdir()
+            (root / '.claude/settings.json').write_text('[1]', encoding='utf-8')
+            doctor.check_settings(project_module.Project(root), doctor.Report())
+
+    def test_project_folder_name_does_not_make_its_settings_managed(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch) / 'managed-app'
+            (root / '.claude').mkdir(parents=True)
+            (root / '.claude/settings.json').write_text('{"availableModels": ["haiku"]}', encoding='utf-8')
+            report = doctor.Report()
+            doctor.check_settings(project_module.Project(root), report)
+        self.assertNotIn('managed availableModels', [item['name'] for item in report.items])
 
 
 class ProjectTests(unittest.TestCase):
@@ -182,6 +282,33 @@ class ProjectTests(unittest.TestCase):
         problems = ' '.join(project_module.validate_config(config))
         for expected in ('max_iterations', 'extra_allow', 'bash_allow'):
             self.assertIn(expected, problems)
+
+    def test_malformed_checks_and_limits_are_rejected(self):
+        for checks in (['npm test'], [{'name': 'test'}], [{'name': '', 'command': 'x'}], 'npm test', 5):
+            with self.subTest(checks=checks):
+                config = project_module.merge_defaults({'checks': checks}, project_module.DEFAULT_CONFIG)
+                self.assertTrue([p for p in project_module.validate_config(config) if p.startswith('checks')])
+        config = project_module.merge_defaults({}, project_module.DEFAULT_CONFIG)
+        config['limits'].update(preflight_max_rounds='3', keep_session_logs=-1)
+        problems = ' '.join(project_module.validate_config(config))
+        for expected in ('preflight_max_rounds', 'keep_session_logs'):
+            self.assertIn(expected, problems)
+
+    def test_setup_explains_malformed_checks(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            project_module.write_json_atomic(Path(scratch) / '.ajimu-autopilot/config.json', {'checks': ['npm test']})
+            with self.assertRaisesRegex(ValueError, 'checks must be'):
+                project_module.setup(scratch)
+
+    def test_roadmap_paths_are_kept_inside_the_project(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch) / 'project'
+            root.mkdir()
+            self.assertEqual('docs/R.md', project_module.project_relative(root, 'docs/../docs/./R.md'))
+            self.assertEqual('R.md', project_module.project_relative(root, root / 'R.md'))
+            for outside in ('../R.md', Path(scratch) / 'R.md'):
+                with self.subTest(outside=outside), self.assertRaisesRegex(ValueError, 'inside the project'):
+                    project_module.project_relative(root, outside)
 
     def test_progress_keeps_patterns_on_top_without_duplicates(self):
         with tempfile.TemporaryDirectory() as scratch:

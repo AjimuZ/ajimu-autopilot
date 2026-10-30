@@ -58,9 +58,10 @@ that fits one session. Keep every requirement of the original roadmap.
 ## 5. Confirm the checks
 
 Set `checks` in `.ajimu-autopilot/config.json` to the project's real build, typecheck,
-lint and test commands. Run each one once. A task cannot be verified without them, so a
-missing or broken command is something to report, not to skip. Add each command to
-`permissions.bash_allow` as described in [references/safety.md](references/safety.md).
+lint and test commands, each as `{"name": "test", "command": "npm test", "required": true}`.
+Run each one once. A task cannot be verified without them, so a missing or broken command
+is something to report, not to skip. Add each command to `permissions.bash_allow` as
+described in [references/safety.md](references/safety.md).
 
 ## 6. Validate
 

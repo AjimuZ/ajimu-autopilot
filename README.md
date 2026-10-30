@@ -27,7 +27,7 @@ finished task is checked by the runner itself, reviewed, documented, committed a
 | --- | --- |
 | Claude Code | Tested with 2.1.314. Needs `--effort`, `--permission-prompts` and `--json-schema` |
 | Python 3.9 or later | No packages needed |
-| Git | With an identity configured and a remote you can push to |
+| Git | With an identity configured and a remote you can push to. The project must be the repository's root |
 | [Ajimu Conventions](https://github.com/AjimuZ/ajimu-conventions) | Required; see below |
 | Claude account | Access to Sonnet, and to Opus for tasks that need it |
 
@@ -86,9 +86,9 @@ python "$HOME/.claude/skills/ajimu-autopilot/scripts/autopilot.py" resume       
 | `setup [--roadmap P] [--branch B] [--remote R] [--json]` | Create or complete the project files |
 | `import-roadmap --roadmap P` | Add unseen roadmap items to the plan |
 | `validate [--live] [--json]` | Check configuration, plan, routing, skills, Git and remote |
-| `run [--max-iterations N] [--task ID]` | Start the loop |
+| `run [--max-iterations N] [--task ID]` | Start the loop; the iteration limit applies to each run |
 | `resume [--max-iterations N] [--task ID]` | Clear a stop request and continue |
-| `stop` | End the current session safely and save state |
+| `stop` | End the current session or check safely and save state |
 | `status [--json]` | Tasks, iteration, selection, checks, last commit and push, errors |
 | `unblock --task ID` | Requeue a blocked task after you resolve its cause |
 | `preflight --task ID` | Run one preflight without implementing |
@@ -98,7 +98,8 @@ All accept `--project PATH` except `route`. Exit status: 0 finished, 1 error, 2 
 configuration, 3 paused and resumable, 4 only blocked tasks remain, 5 a limit was reached.
 
 Configuration is in `.ajimu-autopilot/config.json`: limits, checks, branch, routing overrides
-and permissions. If Claude Code is not on `PATH`, the runner looks for the binary bundled with
+and permissions. Each check is an object such as `{"name": "test", "command": "npm test",
+"required": true}`. If Claude Code is not on `PATH`, the runner looks for the binary bundled with
 the VS Code extension; otherwise set `claude.command` or `AJIMU_AUTOPILOT_CLAUDE`.
 
 ## Architecture
@@ -240,15 +241,17 @@ files only, so it works during a run. Add `--json` for scripts.
 | Check or review fails | Findings go to the next attempt; two retries by default, then blocked |
 | Task blocked | Partial work moves to a stash plus a ref; independent tasks continue |
 | Crash or reboot | `resume` continues from the recorded stage; partial work stays in place |
+| Ctrl+C or a termination signal | The session or check ends too; exit 3, and `resume` continues |
 | Crash right after a commit | The commit is found by its `Task:` line and not repeated |
 | Claude usage runs out | The run waits for the reset, then continues by itself; nothing is charged |
 | Stop request | The run pauses and no attempt is charged |
 | Remote diverged or ahead | The run stops for you; it never rebases or forces |
+| Remote unreachable or refusing | Exit 3 with commits kept; `resume` retries |
 | Forbidden model reported | Critical stop; nothing committed |
 
 ## Limitations
 
-What has actually been run for this release, with Claude Code 2.1.314:
+What has actually been run, with Claude Code 2.1.314:
 
 | Platform | Offline suite (scripted sessions) | Real Claude sessions |
 | --- | --- | --- |
@@ -256,6 +259,8 @@ What has actually been run for this release, with Claude Code 2.1.314:
 | Linux container, Python 3.15 and 3.9 | Yes | No |
 | macOS | No | No |
 
+- **The real sessions above were not repeated for 1.3.1,** which ran with scripted sessions only.
+  It changes how sessions and checks are started and ended, so `validate --live` is worth running.
 - **macOS is untested,** and Linux has not run against a real model. The code uses standard POSIX
   calls and the same logic, but expect to report problems there.
 - **Some paths were only exercised with scripted sessions:** usage limits and the wait for their
@@ -270,7 +275,8 @@ What has actually been run for this release, with Claude Code 2.1.314:
 - **The change scan uses patterns.** It can miss secrets and can raise false alarms.
 - **Deny rules are not a sandbox.** Allowed check commands run project code with your permissions.
 - **Tool and vendor names in commit messages are rejected** by the conventions validator, which
-  can be awkward in projects about those tools.
+  can be awkward in projects about those tools. A task whose ID holds one is blocked before any
+  session runs, and `validate` names it so it can be renamed.
 - **The Windows `claude.cmd` shim is not supported:** `cmd.exe` mangles JSON arguments, and
   `validate` warns about it. Use the native build.
 

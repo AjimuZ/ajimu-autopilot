@@ -39,12 +39,16 @@ script, so the additive fields below are compatible.
 
 - `- [ ]` and `- [x]` items, and `- TODO:` bullets, become tasks.
 - A code such as `P02.1` becomes the ID. Other items get an ID hashed from their text, so
-  an unchanged line keeps its ID when imported again.
+  an unchanged line keeps its ID when imported again. A repeated code or text gets a numbered
+  suffix such as `-2`, because each occurrence is its own task.
 - Nested checkboxes and indented lines stay in the parent's description.
 - `**Depends on:** P01` applies to the section's items; `Exit:` lines become acceptance criteria.
+  Both need their colon, so that ordinary prose is not read as a rule.
 - `- [x]` items import with `passes: true` and a note that the claim is unverified.
 
-Importing again only adds unseen items. It never overwrites a task.
+Importing again only adds unseen items. It never overwrites a task, and a line that a task
+already traces to through `source`, as a split or renamed task does, is not added again. The
+roadmap must be inside the project, and its path is stored relative to the project root.
 
 ## Refining
 
@@ -59,7 +63,11 @@ The importer gives every task generic criteria. Replace them with specific ones:
   keep the source reference.
 
 Keep each `source.line` exactly as imported: the runner uses it to tick the roadmap
-checkbox after a task's checks pass. Do not add tasks for work nobody asked for.
+checkbox after a task's checks pass, turning a `- TODO:` bullet into a ticked checkbox. Do
+not add tasks for work nobody asked for.
+
+An ID must also pass the commit-message validator, which rejects tool and vendor names on the
+`Task:` line. Rename any task `validate` lists, keeping its `source`.
 
 ## Validation
 

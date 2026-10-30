@@ -8,15 +8,13 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import routing
+from . import processes, routing
 
 # Set by a parent Claude Code session; a child inheriting them would act as its nested session.
 SESSION_VARIABLES = (
@@ -178,27 +176,6 @@ def build_argv(command, request, system_file=None):
     return argv
 
 
-def _terminate(process):
-    """Stop a session and its children; subagents would otherwise keep editing the project."""
-    if process.poll() is not None:
-        return
-    try:
-        if sys.platform == 'win32':
-            subprocess.run(['taskkill', '/T', '/F', '/PID', str(process.pid)], capture_output=True, check=False)
-        else:
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-    except (OSError, ProcessLookupError):
-        process.kill()
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        pass
-
-
 def note_rejection(result, info):
     """Record a refused request from a `rate_limit_info` object; `resetsAt` is in epoch seconds."""
     if isinstance(info, dict) and info.get('status') == 'rejected':
@@ -207,12 +184,18 @@ def note_rejection(result, info):
             result.resets_at = info['resetsAt']
 
 
+def _ran_a_model(name):
+    # '<synthetic>' marks locally generated messages, not an inference.
+    return bool(name) and not name.startswith('<')
+
+
 def parse_stream(path):
     """Build a SessionResult from a stream-json log, tolerating truncated or foreign lines."""
     result = SessionResult()
     models = []
     try:
-        lines = Path(path).read_text(encoding='utf-8', errors='replace').splitlines()
+        # Not splitlines: JSON strings can hold U+2028 or U+0085 unescaped, and cutting there would lose the event.
+        lines = Path(path).read_text(encoding='utf-8', errors='replace').split('\n')
     except OSError:
         return result
     for line in lines:
@@ -227,12 +210,11 @@ def parse_stream(path):
             result.init_model = event.get('model')
             result.skills = event.get('skills') or []
             result.session_id = event.get('session_id')
-            if result.init_model:
+            if _ran_a_model(result.init_model):
                 models.append(result.init_model)
         elif kind == 'assistant':
             model = (event.get('message') or {}).get('model')
-            # '<synthetic>' marks locally generated messages, not an inference.
-            if model and not model.startswith('<'):
+            if _ran_a_model(model):
                 models.append(model)
         elif kind == 'result':
             result.has_result = True
@@ -244,7 +226,8 @@ def parse_stream(path):
             result.result_text = event.get('result') or ''
             result.structured = event.get('structured_output')
             for name, usage in (event.get('modelUsage') or {}).items():
-                models.append(name)
+                if _ran_a_model(name):
+                    models.append(name)
                 if isinstance(usage, dict) and usage.get('canonicalModel'):
                     models.append(usage['canonicalModel'])
     result.actual_models = list(dict.fromkeys(models))
@@ -259,7 +242,8 @@ def run_session(command, request, should_stop=None, base_env=None):
     """
     Path(request.log_path).parent.mkdir(parents=True, exist_ok=True)
     system_file = None
-    with tempfile.TemporaryDirectory(prefix='ajimu-autopilot-') as scratch:
+    scratch = tempfile.mkdtemp(prefix='ajimu-autopilot-')
+    try:
         if request.system_append:
             system_file = Path(scratch) / 'system.md'
             system_file.write_text(request.system_append, encoding='utf-8')
@@ -267,29 +251,19 @@ def run_session(command, request, should_stop=None, base_env=None):
         prompt_file.write_text(request.prompt, encoding='utf-8')
         stderr_file = Path(scratch) / 'stderr.txt'
         argv = build_argv(command, request, system_file)
-        options = {'start_new_session': True} if sys.platform != 'win32' else {}
-        timed_out = stopped = False
         with open(prompt_file, 'rb') as stdin, open(request.log_path, 'wb') as stdout, open(stderr_file, 'wb') as stderr:
             process = subprocess.Popen(argv, cwd=request.cwd, env=child_environment(request, base_env),
-                                       stdin=stdin, stdout=stdout, stderr=stderr, **options)
-            deadline = time.monotonic() + request.timeout_seconds
-            while True:
-                try:
-                    process.wait(timeout=1)
-                    break
-                except subprocess.TimeoutExpired:
-                    if time.monotonic() > deadline:
-                        timed_out = True
-                    elif should_stop and should_stop():
-                        stopped = True
-                    if timed_out or stopped:
-                        _terminate(process)
-                        break
+                                       stdin=stdin, stdout=stdout, stderr=stderr, **processes.GROUP_OPTIONS)
+            outcome = processes.wait_bounded(process, request.timeout_seconds, should_stop)
         result = parse_stream(request.log_path)
         result.exit_code = process.returncode
-        result.timed_out = timed_out
-        result.stopped = stopped
+        result.timed_out = outcome == 'timed_out'
+        result.stopped = outcome == 'stopped'
         result.stderr_tail = stderr_file.read_text(encoding='utf-8', errors='replace')[-2000:]
+    finally:
+        # On Windows a process the session left behind can still hold these files. A leftover
+        # folder is harmless, and raising here would throw away the finished session's result.
+        shutil.rmtree(scratch, ignore_errors=True)
     return result
 
 

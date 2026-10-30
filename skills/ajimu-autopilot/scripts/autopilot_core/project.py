@@ -1,0 +1,310 @@
+"""Per-project layout, configuration and the idempotent setup step.
+
+Setup only writes orchestration files. It never commits, never changes branches and
+never starts development. Existing plans and settings are kept and only completed.
+"""
+import copy
+import json
+import re
+import shlex
+from pathlib import Path
+
+from . import prd as prd_module
+from . import roadmap, routing
+from .store import read_json, write_json_atomic, write_text_atomic
+
+PROGRESS_HEADER = '# Ralph Progress Log\n\n## Codebase Patterns\n\n---\n'
+DEFAULT_CONFIG = {
+    'schema': 1,
+    'claude': {'command': None, 'setting_sources': 'project,local'},
+    'limits': {
+        'max_iterations': 30,
+        'max_fix_attempts': 2,
+        'preflight_max_rounds': 3,
+        'session_timeout_minutes': 60,
+        'check_timeout_minutes': 20,
+        'global_timeout_minutes': 720,
+        'max_budget_usd_per_session': 25,
+        'max_budget_usd_total': 150,
+        'keep_session_logs': 40,
+    },
+    'preflight': {'model': 'sonnet', 'effort': 'medium'},
+    'review': {'enabled': True},
+    'routing': {'overrides': {}},
+    'git': {'remote': 'origin', 'branch': 'autopilot/roadmap', 'protected_branches': ['main', 'master']},
+    'checks': [],
+    'docs': {'roadmap': None, 'changelog': None},
+    'permissions': {'bash_allow': [], 'extra_allow': [], 'extra_deny': []},
+}
+ROADMAP_NAMES = ('ROADMAP.md', 'roadmap.md', 'docs/ROADMAP.md', 'docs/roadmap.md', 'TODO.md', 'docs/TODO.md')
+CHANGELOG_NAMES = ('CHANGELOG.md', 'docs/CHANGELOG.md', 'CHANGES.md', 'HISTORY.md')
+UNSAFE_ALLOW = re.compile(r'^\s*(?:Bash\s*(?:\(\s*\*?\s*\))?|Bash\(\s*(?:sudo|rm|git|curl|wget|ssh|scp|chmod|chown)\b.*)\s*$')
+UNSAFE_MODES = ('bypassPermissions', '--dangerously-skip-permissions')
+
+
+class Project:
+    """Paths of one configured repository."""
+
+    def __init__(self, root):
+        self.root = Path(root).resolve()
+        self.ralph_dir = self.root / 'scripts' / 'ralph'
+        self.prd_path = self.ralph_dir / 'prd.json'
+        self.progress_path = self.ralph_dir / 'progress.txt'
+        self.meta_dir = self.root / '.ajimu-autopilot'
+        self.config_path = self.meta_dir / 'config.json'
+        self.tasks_dir = self.meta_dir / 'tasks'
+        self.runtime_dir = self.meta_dir / 'runtime'
+        self.state_path = self.runtime_dir / 'state.json'
+        self.lock_path = self.runtime_dir / 'runner.lock'
+        self.stop_path = self.runtime_dir / 'STOP'
+        self.errors_path = self.runtime_dir / 'errors.log'
+        self.capabilities_path = self.runtime_dir / 'capabilities.json'
+        self.logs_dir = self.runtime_dir / 'logs'
+
+    def is_configured(self):
+        return self.config_path.is_file() and self.prd_path.is_file()
+
+    def ensure_runtime(self):
+        """Make the runtime folder ignore itself, before anything is written into it.
+
+        The ignore file cannot travel through Git, because it ignores itself. A fresh clone
+        has none, and without this its state, logs and lock would be committed as plan files.
+        """
+        ignore = self.runtime_dir / '.gitignore'
+        if ignore.is_file():
+            return False
+        write_text_atomic(ignore, '*\n')
+        return True
+
+    def config(self):
+        """Return the configuration completed with current defaults. Raises when it is absent."""
+        stored = read_json(self.config_path)
+        if stored is None:
+            raise FileNotFoundError(f'{self.config_path} does not exist; run setup first')
+        return merge_defaults(stored, DEFAULT_CONFIG)
+
+    def record_path(self, task_id):
+        return self.tasks_dir / f'{task_id}.json'
+
+
+def merge_defaults(stored, defaults):
+    """Return `stored` with missing keys filled in. Values already present always win."""
+    merged = copy.deepcopy(stored)
+    for key, value in defaults.items():
+        if key not in merged:
+            merged[key] = copy.deepcopy(value)
+        elif isinstance(value, dict) and isinstance(merged[key], dict):
+            merged[key] = merge_defaults(merged[key], value)
+    return merged
+
+
+def validate_config(config):
+    """Return every configuration problem that would weaken a safety rule."""
+    problems = []
+    try:
+        routing.policy_table(config['routing'].get('overrides'))
+    except (routing.ForbiddenModel, routing.RoutingError, KeyError) as error:
+        problems.append(f'routing: {error}')
+    try:
+        if routing.model_family(config['preflight']['model']) != config['preflight']['model']:
+            problems.append('preflight.model must be the alias sonnet or opus')
+    except routing.ForbiddenModel as error:
+        problems.append(f'preflight: {error}')
+    if config['preflight']['effort'] not in routing.EFFORTS:
+        problems.append(f'preflight.effort is unknown: {config["preflight"]["effort"]}')
+    limits = config['limits']
+    for name in ('max_iterations', 'session_timeout_minutes', 'check_timeout_minutes', 'global_timeout_minutes'):
+        if not isinstance(limits.get(name), int) or limits[name] <= 0:
+            problems.append(f'limits.{name} must be a positive integer; an unlimited run is not allowed')
+    if not isinstance(limits.get('max_fix_attempts'), int) or limits['max_fix_attempts'] < 0:
+        problems.append('limits.max_fix_attempts must be zero or more')
+    permissions = config['permissions']
+    for rule in permissions.get('bash_allow', []):
+        if UNSAFE_ALLOW.match(f'Bash({rule})'):
+            problems.append(f'permissions.bash_allow: "{rule}" is too broad or reserved for the runner')
+    for rule in permissions.get('extra_allow', []):
+        if UNSAFE_ALLOW.match(rule) or any(mode in rule for mode in UNSAFE_MODES):
+            problems.append(f'permissions.extra_allow: "{rule}" is too broad or reserved for the runner')
+    command = config['claude'].get('command')
+    if command and any(mode in str(command) for mode in UNSAFE_MODES + ('--fallback-model', '--model')):
+        problems.append('claude.command must not carry permission or model flags')
+    return problems
+
+
+def _scripts(root):
+    try:
+        return (read_json(root / 'package.json') or {}).get('scripts') or {}
+    except ValueError:
+        return {}
+
+
+def detect_checks(root):
+    """Suggest verification commands from project files; return [] when nothing is recognisable.
+
+    These are suggestions, confirmed by the setup session and by `validate`.
+    """
+    root = Path(root)
+    checks = []
+    if (root / 'package.json').is_file():
+        runner = 'pnpm' if (root / 'pnpm-lock.yaml').exists() else 'yarn' if (root / 'yarn.lock').exists() else 'npm'
+        scripts = _scripts(root)
+        for name in ('typecheck', 'lint', 'build', 'test'):
+            if name in scripts and 'no test specified' not in scripts[name]:
+                command = f'{runner} test' if name == 'test' else f'{runner} run {name}'
+                checks.append({'name': name, 'command': command, 'required': True})
+    if (root / 'pyproject.toml').is_file() or (root / 'setup.py').is_file() or (root / 'pytest.ini').is_file():
+        text = (root / 'pyproject.toml').read_text(encoding='utf-8') if (root / 'pyproject.toml').is_file() else ''
+        if 'ruff' in text:
+            checks.append({'name': 'lint', 'command': 'ruff check .', 'required': True})
+        if 'mypy' in text:
+            checks.append({'name': 'typecheck', 'command': 'mypy .', 'required': True})
+        checks.append({'name': 'test', 'command': 'pytest' if 'pytest' in text or (root / 'pytest.ini').exists()
+                       else 'python -m unittest discover', 'required': True})
+    elif (root / 'tests').is_dir() and any((root / 'tests').glob('test_*.py')):
+        checks.append({'name': 'test', 'command': 'python -m unittest discover -s tests', 'required': True})
+    if (root / 'Cargo.toml').is_file():
+        checks += [{'name': 'build', 'command': 'cargo build', 'required': True},
+                   {'name': 'test', 'command': 'cargo test', 'required': True}]
+    if (root / 'go.mod').is_file():
+        checks += [{'name': 'vet', 'command': 'go vet ./...', 'required': True},
+                   {'name': 'test', 'command': 'go test ./...', 'required': True}]
+    if (root / 'gradlew').is_file():
+        checks.append({'name': 'test', 'command': './gradlew test', 'required': True})
+    elif (root / 'pom.xml').is_file():
+        checks.append({'name': 'test', 'command': 'mvn -q test', 'required': True})
+    if any(root.glob('*.sln')) or any(root.glob('*.csproj')):
+        checks.append({'name': 'test', 'command': 'dotnet test', 'required': True})
+    if not checks and (root / 'Makefile').is_file():
+        if re.search(r'^test:', (root / 'Makefile').read_text(encoding='utf-8', errors='replace'), re.MULTILINE):
+            checks.append({'name': 'test', 'command': 'make test', 'required': True})
+    return checks
+
+
+def bash_rules_for_checks(checks):
+    """Derive permission rules letting a session run the checks; compound commands are skipped."""
+    rules = []
+    for check in checks:
+        if any(token in check['command'] for token in ('&&', '||', ';', '|', '>', '<', '`', '$(')):
+            continue
+        try:
+            words = shlex.split(check['command'])
+        except ValueError:
+            continue
+        if words:
+            # `python -m unittest` needs three words: `python -m *` would allow any module.
+            width = 3 if len(words) > 2 and (words[1] == 'run' or words[1].startswith('-')) else 2
+            rules.append(' '.join(words[:width]) + ' *')
+    return list(dict.fromkeys(rules))
+
+
+def _project_relative(root, path):
+    """Return a project-relative POSIX path, so no machine-specific path enters tracked files."""
+    candidate = Path(path)
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.resolve().relative_to(Path(root).resolve())
+        except ValueError:
+            raise ValueError(f'the roadmap must be inside the project: {path}') from None
+    return candidate.as_posix()
+
+
+def find_first(root, names):
+    for name in names:
+        if (Path(root) / name).is_file():
+            return name
+    return None
+
+
+def setup(root, roadmap_path=None, branch=None, remote=None):
+    """Create or complete the orchestration files; return a report of what happened.
+
+    Idempotent: a second run with the same input changes nothing. Existing stories,
+    settings and progress entries are never overwritten.
+    """
+    project = Project(root)
+    report = {'created': [], 'updated': [], 'imported': [], 'warnings': []}
+    existed = project.config_path.is_file()
+    stored = read_json(project.config_path, {}) if existed else {}
+    config = merge_defaults(stored, DEFAULT_CONFIG)
+    if branch:
+        config['git']['branch'] = branch
+    if remote:
+        config['git']['remote'] = remote
+    if not config['checks']:
+        config['checks'] = detect_checks(project.root)
+        if not config['checks']:
+            report['warnings'].append('no check command was detected; add "checks" before running')
+    config['permissions']['bash_allow'] = list(dict.fromkeys(
+        config['permissions']['bash_allow'] + bash_rules_for_checks(config['checks'])))
+    config['docs']['changelog'] = config['docs']['changelog'] or find_first(project.root, CHANGELOG_NAMES)
+    if roadmap_path:
+        config['docs']['roadmap'] = _project_relative(project.root, roadmap_path)
+    config['docs']['roadmap'] = config['docs']['roadmap'] or find_first(project.root, ROADMAP_NAMES)
+    problems = validate_config(config)
+    if problems:
+        raise ValueError('; '.join(problems))
+    if config != stored:
+        write_json_atomic(project.config_path, config)
+        report['updated' if existed else 'created'].append(project.config_path.relative_to(project.root).as_posix())
+
+    plan_existed = project.prd_path.is_file()
+    plan = read_json(project.prd_path) if plan_existed else prd_module.new_plan(project.root.name, config['git']['branch'])
+    before = json.dumps(plan, sort_keys=True)
+    if plan['branchName'] != config['git']['branch']:
+        plan['branchName'] = config['git']['branch']
+    source = config['docs']['roadmap']
+    if source and (project.root / source).is_file():
+        stories, _ = roadmap.parse_file(project.root, source)
+        report['imported'] = roadmap.merge(plan, stories)
+    elif source:
+        report['warnings'].append(f'roadmap {source} does not exist')
+    else:
+        report['warnings'].append('no roadmap was found; add stories to scripts/ralph/prd.json')
+    if not plan_existed or json.dumps(plan, sort_keys=True) != before:
+        prd_module.save(project.prd_path, plan)
+        report['updated' if plan_existed else 'created'].append('scripts/ralph/prd.json')
+    if not project.progress_path.is_file():
+        write_text_atomic(project.progress_path, PROGRESS_HEADER)
+        report['created'].append('scripts/ralph/progress.txt')
+    # A self-ignoring folder avoids editing the owner's root .gitignore.
+    if project.ensure_runtime():
+        report['created'].append('.ajimu-autopilot/runtime/.gitignore')
+    project.tasks_dir.mkdir(parents=True, exist_ok=True)
+    return report
+
+
+def add_progress(path, heading, lines, patterns=()):
+    """Append one Ralph-format entry and merge reusable patterns into the top section.
+
+    Duplicated patterns are dropped so the section stays short enough to give every
+    new session in full.
+    """
+    text = Path(path).read_text(encoding='utf-8') if Path(path).is_file() else PROGRESS_HEADER
+    marker = '## Codebase Patterns\n'
+    if marker not in text:
+        text = marker + '\n---\n' + text
+    start = text.index(marker) + len(marker)
+    end = text.find('\n---', start)
+    end = len(text) if end < 0 else end
+    section = text[start:end]
+    fresh = [p.strip() for p in patterns if p.strip() and f'- {p.strip()}\n' not in section + '\n']
+    if fresh:
+        section = section.rstrip('\n') + '\n' + ''.join(f'- {pattern}\n' for pattern in fresh)
+        text = text[:start] + section + text[end:]
+    entry = f'\n## {heading}\n' + ''.join(f'{line}\n' for line in lines) + '---\n'
+    write_text_atomic(path, text.rstrip('\n') + '\n' + entry)
+
+
+def progress_context(path, recent_entries=3, limit_chars=6000):
+    """Return the patterns section and the latest entries, bounded for a fresh session's prompt."""
+    try:
+        text = Path(path).read_text(encoding='utf-8')
+    except OSError:
+        return ''
+    marker = '## Codebase Patterns'
+    start = text.find(marker)
+    end = text.find('\n---', start) if start >= 0 else -1
+    patterns = text[start:end] if start >= 0 and end >= 0 else ''
+    entries = re.split(r'\n(?=## \d{4}-)', text[end + 4:] if end >= 0 else text)
+    recent = [entry.strip() for entry in entries if entry.strip().startswith('## ')][-recent_entries:]
+    return (patterns + '\n\n' + '\n\n'.join(recent)).strip()[-limit_chars:]

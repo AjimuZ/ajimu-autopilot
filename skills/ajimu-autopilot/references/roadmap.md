@@ -1,0 +1,67 @@
+# Roadmap and tasks
+
+## The plan file
+
+`scripts/ralph/prd.json` keeps Ralph's format. Upstream only reads `branchName` from it by
+script, so the additive fields below are compatible.
+
+```json
+{
+  "project": "MyApp",
+  "branchName": "autopilot/roadmap",
+  "description": "What this plan delivers",
+  "userStories": [
+    {
+      "id": "P02.1",
+      "title": "Import a Git bundle",
+      "description": "Import a bundle into an isolated workspace.",
+      "acceptanceCriteria": ["An import never writes to the original checkout", "Import tests pass"],
+      "priority": 1,
+      "passes": false,
+      "notes": "",
+      "dependsOn": ["P01.3"],
+      "source": {"path": "docs/roadmap.md", "section": "P02", "line": "P02.1 Import a Git bundle."}
+    }
+  ]
+}
+```
+
+| Requirement | Where it lives |
+| --- | --- |
+| Stable ID, title, description, priority, acceptance criteria, completion | `prd.json` (Ralph fields) |
+| Dependencies and traceability | `prd.json` (`dependsOn`, `source`, `splitFrom`) |
+| Live status, attempts, blocks in progress | `.ajimu-autopilot/runtime/state.json` |
+| Original text, corrections, preflight, executions, blockers | `.ajimu-autopilot/tasks/<ID>.json` |
+
+## Import
+
+`setup` and `import-roadmap` read Markdown:
+
+- `- [ ]` and `- [x]` items, and `- TODO:` bullets, become tasks.
+- A code such as `P02.1` becomes the ID. Other items get an ID hashed from their text, so
+  an unchanged line keeps its ID when imported again.
+- Nested checkboxes and indented lines stay in the parent's description.
+- `**Depends on:** P01` applies to the section's items; `Exit:` lines become acceptance criteria.
+- `- [x]` items import with `passes: true` and a note that the claim is unverified.
+
+Importing again only adds unseen items. It never overwrites a task.
+
+## Refining
+
+The importer gives every task generic criteria. Replace them with specific ones:
+
+- **Atomic:** one deliverable that fits one session. Split anything that touches many
+  subsystems, unless the preflight is better placed to split it after reading the code.
+- **Verifiable:** each criterion can be checked by a test or an observable behavior.
+  Prefer "Empty names return a validation error" to "Validation works".
+- **Ordered:** a lower `priority` number runs first among tasks whose dependencies are done.
+- **Complete:** every requirement of the source stays somewhere in the plan. If you reword,
+  keep the source reference.
+
+Keep each `source.line` exactly as imported: the runner uses it to tick the roadmap
+checkbox after a task's checks pass. Do not add tasks for work nobody asked for.
+
+## Validation
+
+`validate` rejects duplicate or unsafe IDs, missing fields, empty criteria, unknown
+dependencies and cycles, and names each problem.

@@ -35,6 +35,8 @@ ROUTING_VARIABLES = (
 )
 TRANSIENT_STATUSES = (429, 500, 502, 503, 504, 529)
 AUTH_STATUSES = (401, 403)
+# How Claude Code words a refused request when neither a status nor an event says so.
+LIMIT_TEXT = re.compile(r"you've hit your .*limit|usage limit reached", re.IGNORECASE)
 
 
 @dataclass
@@ -71,6 +73,7 @@ class SessionResult:
     subtype: object = None
     api_error_status: object = None
     rate_limited: bool = False
+    resets_at: object = None
     permission_denials: list = field(default_factory=list)
     cost_usd: float = 0.0
     result_text: str = ''
@@ -80,7 +83,15 @@ class SessionResult:
 
     @property
     def transient(self):
-        return self.rate_limited or self.api_error_status in TRANSIENT_STATUSES
+        """True when a usage or service limit ended the session, which says nothing about the work.
+
+        A session that finished cleanly never counts, even after a rejected event: paid
+        extra usage can carry it past the window that refused it.
+        """
+        if self.has_result and not self.is_error:
+            return False
+        return (self.rate_limited or self.api_error_status in TRANSIENT_STATUSES
+                or bool(LIMIT_TEXT.search(f'{self.result_text}\n{self.stderr_tail}')))
 
     @property
     def auth_failure(self):
@@ -188,6 +199,14 @@ def _terminate(process):
         pass
 
 
+def note_rejection(result, info):
+    """Record a refused request from a `rate_limit_info` object; `resetsAt` is in epoch seconds."""
+    if isinstance(info, dict) and info.get('status') == 'rejected':
+        result.rate_limited = True
+        if isinstance(info.get('resetsAt'), (int, float)):
+            result.resets_at = info['resetsAt']
+
+
 def parse_stream(path):
     """Build a SessionResult from a stream-json log, tolerating truncated or foreign lines."""
     result = SessionResult()
@@ -202,6 +221,8 @@ def parse_stream(path):
         except ValueError:
             continue
         kind = event.get('type') if isinstance(event, dict) else None
+        if kind:
+            note_rejection(result, event.get('rate_limit_info'))
         if kind == 'system' and event.get('subtype') == 'init':
             result.init_model = event.get('model')
             result.skills = event.get('skills') or []
@@ -213,9 +234,6 @@ def parse_stream(path):
             # '<synthetic>' marks locally generated messages, not an inference.
             if model and not model.startswith('<'):
                 models.append(model)
-        elif kind == 'rate_limit_event':
-            if (event.get('rate_limit_info') or {}).get('status') == 'rejected':
-                result.rate_limited = True
         elif kind == 'result':
             result.has_result = True
             result.is_error = bool(event.get('is_error'))

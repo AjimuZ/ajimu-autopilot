@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -573,14 +574,100 @@ class RunnerTests(Sandbox):
         worker.run()
         self.assertIn('timed out', self.state()['tasks']['T-1']['findings'][0])
 
-    def test_rate_limit_pauses_without_charging_an_attempt(self):
+    def waiting_runner(self, on_sleep=None, **options):
+        """A runner whose waits advance a fake clock; returns it and the list of naps taken."""
+        now, naps = [time.time()], []
+
+        def sleep(seconds):
+            naps.append(seconds)
+            now[0] += seconds
+            if on_sleep:
+                on_sleep()
+        return self.runner(clock=lambda: now[0], sleep=sleep, **options), naps
+
+    LIMITED = {'rate_limited': True, 'is_error': True, 'api_error_status': 429}
+
+    def test_usage_limit_waits_for_the_reset_and_continues_the_work(self):
         self.layout = self.make_repository([self.story()])
         phases = self.happy()
-        phases['implementation'] = [{'rate_limited': True, 'is_error': True, 'api_error_status': 429}]
+        phases['implementation'].insert(0, {**self.LIMITED, 'resets_at': int(time.time()) + 3600,
+                                            'edits': self.edit(content='partial\n')})
         self.scenario(**phases)
-        self.assertEqual(runner_module.EXIT_PAUSED, self.runner().run())
-        entry = self.state()['tasks']['T-1']
-        self.assertEqual(0, entry['attempts'])
+        worker, naps = self.waiting_runner(max_iterations=1)
+        self.assertEqual(runner_module.EXIT_COMPLETE, worker.run(), self.lines)
+        self.assertGreater(sum(naps), 3600)
+        self.assertLess(sum(naps), 3700)
+        self.assertTrue(any('waiting until' in line for line in self.lines), self.lines)
+        launches = self.launches('implementation')
+        self.assertEqual(2, len(launches))
+        self.assertIn('A previous attempt was interrupted', launches[1]['prompt'])
+        state = self.state()
+        self.assertEqual((1, 1), (state['tasks']['T-1']['attempts'], state['iteration']), 'no attempt or iteration charged')
+        self.assertEqual('complete', state['run']['status'])
+        self.assertGreater(worker.deadline - time.monotonic(), 720 * 60 + 3000, 'the wait is not charged to the global timeout')
+
+    def test_usage_limit_without_a_future_reset_retries_periodically(self):
+        self.layout = self.make_repository([self.story()])
+        phases = self.happy()
+        phases['preflight'] = [self.LIMITED, {**self.LIMITED, 'resets_at': int(time.time()) - 60}] + phases['preflight']
+        self.scenario(**phases)
+        worker, naps = self.waiting_runner(max_iterations=1)
+        self.assertEqual(runner_module.EXIT_COMPLETE, worker.run(), self.lines)
+        self.assertAlmostEqual(600, sum(naps), delta=1)
+        self.assertEqual(3, len(self.launches('preflight')))
+
+    def test_usage_limit_during_review_keeps_the_work_and_the_preflight(self):
+        self.layout = self.make_repository([self.story()])
+        phases = self.happy()
+        phases['review'].insert(0, self.LIMITED)
+        phases['implementation'].append({'structured': done_output()})
+        self.scenario(**phases)
+        worker, _ = self.waiting_runner()
+        self.assertEqual(runner_module.EXIT_COMPLETE, worker.run(), self.lines)
+        self.assertEqual(1, len(self.launches('preflight')))
+        self.assertEqual(2, len(self.launches('implementation')))
+        self.assertEqual(1, self.state()['tasks']['T-1']['attempts'])
+        self.assertIn('changed', (self.project / 'app.txt').read_text(encoding='utf-8'))
+
+    def test_usage_limit_named_only_in_the_result_text_waits(self):
+        self.layout = self.make_repository([self.story()])
+        phases = self.happy()
+        phases['implementation'].insert(0, {'is_error': True, 'text': "You've hit your session limit, resets 3pm"})
+        self.scenario(**phases)
+        worker, naps = self.waiting_runner()
+        self.assertEqual(runner_module.EXIT_COMPLETE, worker.run(), self.lines)
+        self.assertTrue(naps)
+        self.assertEqual(1, self.state()['tasks']['T-1']['attempts'])
+
+    def test_rejected_event_on_a_finished_session_is_not_a_limit(self):
+        self.layout = self.make_repository([self.story()])
+        phases = self.happy()
+        phases['implementation'][0]['rate_limited'] = True
+        self.scenario(**phases)
+        worker, naps = self.waiting_runner()
+        self.assertEqual(runner_module.EXIT_COMPLETE, worker.run(), self.lines)
+        self.assertEqual([], naps)
+        self.assertEqual(1, len(self.launches('implementation')))
+
+    def test_stop_during_a_usage_wait_pauses_and_resume_continues(self):
+        self.layout = self.make_repository([self.story()])
+        phases = self.happy()
+        phases['implementation'].insert(0, {**self.LIMITED, 'edits': self.edit(content='partial\n')})
+        self.scenario(**phases)
+        seen = []
+
+        def stop():
+            seen.append(self.state()['run']['status'])
+            runner_module.request_stop(self.project)
+        worker, _ = self.waiting_runner(on_sleep=stop)
+        self.assertEqual(runner_module.EXIT_PAUSED, worker.run(), self.lines)
+        self.assertEqual(['waiting'], seen)
+        self.assertEqual('paused', self.state()['run']['status'])
+        self.assertFalse(self.layout.lock_path.exists())
+        self.assertEqual('partial\n', (self.project / 'app.txt').read_text(encoding='utf-8'))
+        runner_module.clear_stop(self.project)
+        self.assertEqual(runner_module.EXIT_COMPLETE, self.runner().run(), self.lines)
+        self.assertEqual(2, len(self.launches('implementation')))
 
     def test_second_runner_is_refused(self):
         self.layout = self.make_repository([self.story()])
@@ -987,6 +1074,13 @@ class CommandLineTests(Sandbox):
         self.assertEqual(0, result.returncode, result.stderr + result.stdout)
         self.assertEqual('ready', json.loads(result.stdout)['outcome'])
         self.assertEqual(['preflight'], [entry['phase'] for entry in self.launches()])
+
+    def test_standalone_preflight_pauses_at_a_usage_limit_instead_of_waiting(self):
+        self.make_repository([self.story()])
+        self.scenario(preflight=[{'rate_limited': True, 'is_error': True, 'api_error_status': 429}])
+        result = self.cli('preflight', '--task', 'T-1')
+        self.assertEqual(runner_module.EXIT_PAUSED, result.returncode, result.stderr + result.stdout)
+        self.assertIn('usage or service limit', result.stderr)
 
     def test_run_stop_resume_and_status_commands(self):
         layout = self.make_repository([self.story()])

@@ -43,6 +43,8 @@ PATH_DENY = ('Edit(/scripts/ralph/**)', 'Write(/scripts/ralph/**)', 'Edit(/.ajim
              'Edit(**/.env*)', 'Write(**/.env*)', 'Read(**/.env)', 'Read(**/.env.*)', 'Edit(/.git/**)', 'Write(/.git/**)')
 SHELL_DENY = ('Bash(sudo *)', 'Bash(rm -rf *)', 'Bash(rm -fr *)', 'Bash(curl *)', 'Bash(wget *)', 'Bash(ssh *)',
               'Bash(scp *)', 'Bash(npm publish *)', 'Bash(gh *)')
+RESET_MARGIN_SECONDS = 60
+WAIT_TICK_SECONDS = 5
 
 
 class Halt(Exception):
@@ -54,8 +56,18 @@ class Halt(Exception):
         self.message = message
 
 
+class UsageLimit(Halt):
+    """A usage or service limit ended a session. `loop` waits it out; other callers see a pause."""
+
+    def __init__(self, reason, resets_at=None):
+        super().__init__(EXIT_PAUSED, f'{reason}. Run "resume" later')
+        self.reason = reason
+        self.resets_at = resets_at
+
+
 class Runner:
-    def __init__(self, root, *, max_iterations=None, only_task=None, base_env=None, output=print):
+    def __init__(self, root, *, max_iterations=None, only_task=None, base_env=None, output=print, clock=time.time,
+                 sleep=time.sleep):
         self.project = project_module.Project(root)
         self.config = self.project.config()
         self.project.ensure_runtime()
@@ -64,6 +76,8 @@ class Runner:
         self.only_task = only_task
         self.base_env = base_env
         self.output = output
+        self.clock = clock
+        self.sleep = sleep
         self.state = None
         self.conventions = None
         self.command = None
@@ -248,7 +262,9 @@ class Runner:
                 interrupted = True
                 self.log_error(f'recovered from an interrupted {status} stage', task_id)
             elif status in ('ready', 'committing', 'pushing'):
-                interrupted = interrupted or bool(entry.get('attempts')) or status != 'ready'
+                # A refunded attempt has no count left, but its partial work is still in the tree.
+                interrupted = (interrupted or bool(entry.get('attempts')) or bool(entry.get('interrupted'))
+                               or status != 'ready')
         self.save_state()
         return interrupted
 
@@ -294,8 +310,38 @@ class Runner:
             self.state['iteration'] += 1
             self.save_state()
             self.output(f'iteration {self.state["iteration"]}: {item["id"]} {item["title"]}')
-            self.process(item['id'])
+            try:
+                self.process(item['id'])
+            except UsageLimit as limit:
+                # A retry is the same iteration: a long wait must not use up the iteration limit.
+                self.state['iteration'] -= 1
+                self.wait_for_usage(limit)
             self.prune_logs()
+
+    def wait_for_usage(self, limit):
+        """Hold the run, with its lock, until usage should be back; the loop then retries the task.
+
+        Waits for the reset time the session reported, or for `limits.usage_retry_minutes`
+        when there is none or it has passed. Only a stop request ends the wait, because
+        nothing is spent while waiting and the owner asked the run to outlast the limit.
+        The time waited does not count against the global timeout. The wall clock is used
+        so that a machine suspended past the reset retries as soon as it wakes.
+        """
+        now = self.clock()
+        retry = self.config['limits']['usage_retry_minutes'] * 60
+        until = limit.resets_at + RESET_MARGIN_SECONDS if limit.resets_at and limit.resets_at > now else now + retry
+        self.recover_states()
+        message = f'{limit.reason}; waiting until {datetime.fromtimestamp(until).strftime("%Y-%m-%d %H:%M:%S")}'
+        self.state['run'].update(status='waiting', message=message)
+        self.save_state()
+        self.output(message)
+        while self.clock() < until:
+            if self.stop_requested():
+                raise Halt(EXIT_PAUSED, 'stop requested while waiting for usage; run "resume" to continue')
+            self.sleep(min(WAIT_TICK_SECONDS, until - self.clock()))
+        self.deadline += self.clock() - now
+        self.state['run'].update(status='running', message=None)
+        self.save_state()
 
     def next_task(self, plan, statuses):
         if self.only_task:
@@ -358,8 +404,9 @@ class Runner:
     def base_session(self, phase, task_id, model, effort, prompt, schema_name, tools, allow, deny, ack=None):
         """Launch one independent session and apply every post-run policy check.
 
-        Halts the run for a forbidden model, a stop request, a usage limit or an
-        authentication failure, so the caller only sees sessions that really ended.
+        Halts the run for a forbidden model, a stop request or an authentication failure,
+        and raises UsageLimit for a usage limit, so the caller only sees sessions that
+        really ended.
         """
         routing.model_family(model)
         system = preflight.load_prompt('system_rules')
@@ -392,9 +439,9 @@ class Runner:
         if result.stopped:
             raise Halt(EXIT_PAUSED, 'stop requested during a session; run "resume" to continue')
         if result.transient:
-            message = f'{task_id} {phase}: temporary service limit (status {result.api_error_status}); no attempt was charged'
-            self.log_error(message, task_id)
-            raise Halt(EXIT_PAUSED, message + '. Run "resume" later')
+            reason = f'{task_id} {phase}: usage or service limit (status {result.api_error_status}); no attempt was charged'
+            self.log_error(reason, task_id)
+            raise UsageLimit(reason, result.resets_at)
         if result.auth_failure:
             raise Halt(EXIT_ERROR, f'{task_id} {phase}: Claude Code authentication failed; sign in again and resume')
         if not result.has_result and result.exit_code not in (0, None) and not result.timed_out:
@@ -499,11 +546,12 @@ class Runner:
         preflight.require_passed(record.get('preflight'), item, head)
         decision = record['preflight']['routing']
         model = decision['model']
-        if self.git.foreign_changes() and not self.entry(task_id).get('attempts'):
+        if self.git.foreign_changes() and not self.entry(task_id).get('attempts') and not self.entry(task_id).get('interrupted'):
             raise Halt(EXIT_ERROR, f'{task_id}: unexpected uncommitted changes before the first attempt')
         effort, effort_note = routing.compatible_effort(self.resolved_id(model), decision['effort'])
         entry = self.entry(task_id)
         attempt = entry.get('attempts', 0) + 1
+        resuming = bool(entry.get('interrupted'))
         self.transition(task_id, 'running', attempts=attempt, base_commit=head, interrupted=False)
         ack = secrets.token_hex(8)
         protected = self.snapshot_owned()
@@ -512,7 +560,7 @@ class Runner:
                      'effort_verifiable': False, 'effective_effort': None, 'status': 'running'}
         try:
             result, report = self.base_session('implementation', task_id, model, effort,
-                                               self.implementation_prompt(item, record), 'implementation', WRITE_TOOLS,
+                                               self.implementation_prompt(item, record, resuming), 'implementation', WRITE_TOOLS,
                                                self.write_allow(), (), ack=ack)
         except Halt as halt:
             self.refund_attempt(task_id, halt)
@@ -582,13 +630,14 @@ class Runner:
                 if content is not None:
                     path.write_bytes(content)
 
-    def implementation_prompt(self, item, record):
+    def implementation_prompt(self, item, record, resuming=False):
+        """Render the prompt of one attempt; `resuming` says an interrupted one left work in the tree."""
         entry = self.entry(item['id'])
         pre = record['preflight']
         conclusions = {name: pre.get(name) for name in ('issues', 'risks', 'required_tests', 'complexity',
                                                         'estimated_change_size', 'routing_reason')}
         findings = entry.get('findings') or []
-        if entry.get('interrupted'):
+        if resuming:
             findings = ['A previous attempt was interrupted. Its partial changes are in the working tree; '
                         'inspect them with git status and git diff, and continue from them.'] + findings
         return preflight.render(

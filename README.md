@@ -241,7 +241,8 @@ files only, so it works during a run. Add `--json` for scripts.
 | Task blocked | Partial work moves to a stash plus a ref; independent tasks continue |
 | Crash or reboot | `resume` continues from the recorded stage; partial work stays in place |
 | Crash right after a commit | The commit is found by its `Task:` line and not repeated |
-| Rate limit or stop request | The run pauses and no attempt is charged |
+| Claude usage runs out | The run waits for the reset, then continues by itself; nothing is charged |
+| Stop request | The run pauses and no attempt is charged |
 | Remote diverged or ahead | The run stops for you; it never rebases or forces |
 | Forbidden model reported | Critical stop; nothing committed |
 
@@ -257,7 +258,8 @@ What has actually been run for this release, with Claude Code 2.1.314:
 
 - **macOS is untested,** and Linux has not run against a real model. The code uses standard POSIX
   calls and the same logic, but expect to report problems there.
-- **Some paths were only exercised with scripted sessions:** rate limits, budget stops, Opus being
+- **Some paths were only exercised with scripted sessions:** usage limits and the wait for their
+  reset, budget stops, Opus being
   unavailable, and silent model substitution during a task. Their handling is tested, but real
   sessions did not trigger them.
 - **Effective effort cannot be read back,** as described above.
@@ -280,7 +282,11 @@ testing. Real tasks cost much more, especially on Opus at high effort.
 
 Defaults stop a run at 25 USD per session, 150 USD in total, 30 iterations, 60 minutes per session
 and 12 hours overall. Those amounts are Claude Code's estimates, not billing data, and on a
-subscription usage limits apply instead.
+subscription usage limits apply instead. When usage runs out, the run stays in the foreground
+and waits for the reset, however long that takes, and time spent waiting does not count against
+those 12 hours. `stop` ends the wait, and `status` shows when it should end. Keep the terminal and
+the machine on, or start again with `resume`. Details:
+[safety.md](skills/ajimu-autopilot/references/safety.md).
 
 Run on a machine or container you are comfortable with, particularly for repositories you did not
 write. Their tests run with your permissions, and their content could try to influence the model.

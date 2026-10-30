@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.3.0 - 2026-10-30
+
+### Changed
+
+- When Claude's usage runs out, or the service returns a temporary error, `run` and `resume` now
+  wait and continue by themselves instead of exiting. They use the reported reset time, or retry
+  every `limits.usage_retry_minutes` (default 5). No attempt or iteration is charged, the wait does
+  not count against the global timeout, and `stop` ends it.
+
+### Fixed
+
+- A limit or stop on a task's first attempt no longer makes the next start refuse its partial work
+  as unexpected changes.
+- The session after an interrupted attempt is now really told to continue from the partial work.
+  The notice was cleared before the prompt was built, so it never arrived.
+- A session that finished cleanly after a rejected usage event is no longer discarded.
+- A limit named only in the session's result text no longer uses up the task's attempts.
+
 ## 1.2.0 - 2026-10-30
 
 ### Changed

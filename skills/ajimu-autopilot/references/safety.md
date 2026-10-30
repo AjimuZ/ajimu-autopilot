@@ -1,5 +1,15 @@
 # Safety
 
+## Contents
+
+- Permissions
+- Untrusted content
+- Limits
+- Usage limits
+- Other controls
+- Working on main
+- If permissions are not enough
+
 ## Permissions
 
 Sessions run with `--permission-mode dontAsk` and `--permission-prompts none`: what is not
@@ -55,14 +65,29 @@ would running its code.
 | `limits.max_fix_attempts` | 2 | Retries after the first attempt, then blocks |
 | `limits.preflight_max_rounds` | 3 | Preflight rounds per task, then blocks |
 | `limits.session_timeout_minutes` | 60 | Ends a session; counts as a failed attempt |
+| `limits.usage_retry_minutes` | 5 | Retry interval during a usage wait with no known reset time |
 | `limits.check_timeout_minutes` | 20 | Fails a check |
 | `limits.global_timeout_minutes` | 720 | Stops the run; `resume` continues |
 | `limits.max_budget_usd_per_session` | 25 | Passed to `--max-budget-usd` |
 | `limits.max_budget_usd_total` | 150 | Stops the run when the estimate reaches it |
 
 The budget figures are Claude Code's client-side estimates, not billing data. On a
-subscription they do not represent charges, and usage limits apply instead: a rate limit
-pauses the run without charging an attempt, and `resume` continues later.
+subscription they do not represent charges, and usage limits apply instead.
+
+## Usage limits
+
+When Claude's usage runs out, or the service answers with a temporary error (429 or 5xx), `run`
+and `resume` stay in the foreground and wait. They wait until the reset time the session
+reported, plus one minute, or retry every `limits.usage_retry_minutes` when no future reset time
+is known. Then the same task continues, and its partial work stays in the working tree.
+
+- The wait has no time limit, even for a weekly limit. No attempt or iteration is charged, and
+  the time does not count against `limits.global_timeout_minutes`.
+- `status` shows `waiting` with the planned time. `stop` ends the wait within seconds, and
+  `resume` continues later.
+- The process has to stay alive. After a reboot or a closed terminal, start it again with `resume`.
+- The runner holds its lock during the wait, so a second run on the project is refused.
+- A standalone `preflight` command does not wait: it exits with status 3.
 
 ## Other controls
 

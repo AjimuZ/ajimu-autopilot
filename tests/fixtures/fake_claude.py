@@ -2,7 +2,8 @@
 
 The scenario file maps a phase name to a list of steps consumed in order. A step may
 set `structured`, `models`, `edits` (paths to contents), `delete`, `run` (argv),
-`is_error`, `subtype`, `api_error_status`, `sleep`, or `exit`. Phases come from the
+`is_error`, `subtype`, `api_error_status`, `rate_limited`, `resets_at`, `text`, `sleep`, or
+`exit`. Phases come from the
 `AUTOPILOT-PHASE:` line of the prompt. `__VERSION__` and `__ACK__` in a structured value
 are replaced by the task version in the prompt and the ack token in the system file.
 """
@@ -45,7 +46,7 @@ def main():
     ack = re.search(r'ACK-TOKEN: (\S+)', system)
     ack = ack.group(1) if ack else ''
     with open(log_path, 'a', encoding='utf-8') as handle:
-        handle.write(json.dumps({'phase': phase, 'argv': argv, 'cwd': os.getcwd(), 'has_conventions': 'Ajimu conventions' in system,
+        handle.write(json.dumps({'phase': phase, 'argv': argv, 'cwd': os.getcwd(), 'prompt': prompt, 'has_conventions': 'Ajimu conventions' in system,
                                  'env': {k: v for k, v in os.environ.items()
                                          if k.startswith(('ANTHROPIC_', 'CLAUDE_CODE_', 'CLAUDECODE'))}}) + '\n')
     scenario = json.loads(Path(scenario_path).read_text(encoding='utf-8'))
@@ -67,7 +68,8 @@ def main():
     models = step.get('models') or [f'claude-{requested}-5-5']
     print(json.dumps({'type': 'system', 'subtype': 'init', 'model': models[0], 'skills': [], 'session_id': 'fake'}))
     if step.get('rate_limited'):
-        print(json.dumps({'type': 'rate_limit_event', 'rate_limit_info': {'status': 'rejected'}}))
+        reset = {'resetsAt': step['resets_at']} if 'resets_at' in step else {}
+        print(json.dumps({'type': 'rate_limit_event', 'rate_limit_info': {'status': 'rejected', **reset}}))
     is_error = step.get('is_error', False)
     print(json.dumps({
         'type': 'result', 'subtype': step.get('subtype', 'error_during_execution' if is_error else 'success'),

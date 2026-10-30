@@ -56,4 +56,5 @@ other configuration again: they do not travel with the repository. Task records 
 so open tasks get a new preflight, and correction history stays on the machine that made it.
 
 An interrupted attempt keeps its attempt count. A stop request or a usage limit gives the
-attempt back, because neither says anything about the work.
+attempt back, because neither says anything about the work. A usage limit does not need
+`resume`: the runner waits and continues by itself, as described in the safety reference.

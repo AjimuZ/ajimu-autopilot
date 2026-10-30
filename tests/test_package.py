@@ -166,6 +166,13 @@ class ProjectTests(unittest.TestCase):
                   {'name': 'c', 'command': 'pytest'}, {'name': 'd', 'command': 'make a && make b'}]
         self.assertEqual(['python -m unittest *', 'npm run lint *', 'pytest *'], project_module.bash_rules_for_checks(checks))
 
+    def test_unusable_usage_retry_interval_is_rejected(self):
+        from autopilot_core import project as project_module
+        config = project_module.merge_defaults({}, project_module.DEFAULT_CONFIG)
+        self.assertEqual(5, config['limits']['usage_retry_minutes'])
+        config['limits']['usage_retry_minutes'] = 0
+        self.assertTrue([p for p in project_module.validate_config(config) if 'usage_retry_minutes' in p])
+
     def test_unlimited_or_unsafe_configuration_is_rejected(self):
         config = project_module.merge_defaults({}, project_module.DEFAULT_CONFIG)
         self.assertEqual([], project_module.validate_config(config))

@@ -23,6 +23,7 @@ DEFAULT_CONFIG = {
         'max_fix_attempts': 2,
         'preflight_max_rounds': 3,
         'session_timeout_minutes': 60,
+        'usage_retry_minutes': 5,
         'check_timeout_minutes': 20,
         'global_timeout_minutes': 720,
         'max_budget_usd_per_session': 25,
@@ -121,7 +122,8 @@ def validate_config(config):
     if config['preflight']['effort'] not in routing.EFFORTS:
         problems.append(f'preflight.effort is unknown: {config["preflight"]["effort"]}')
     limits = config['limits']
-    for name in ('max_iterations', 'session_timeout_minutes', 'check_timeout_minutes', 'global_timeout_minutes'):
+    for name in ('max_iterations', 'session_timeout_minutes', 'check_timeout_minutes', 'global_timeout_minutes',
+                 'usage_retry_minutes'):
         if not isinstance(limits.get(name), int) or limits[name] <= 0:
             problems.append(f'limits.{name} must be a positive integer; an unlimited run is not allowed')
     if not isinstance(limits.get('max_fix_attempts'), int) or limits['max_fix_attempts'] < 0:

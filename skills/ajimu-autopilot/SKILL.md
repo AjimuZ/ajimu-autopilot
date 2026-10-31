@@ -96,6 +96,7 @@ stays listening and fixes what stops it. These commands work unattended from any
 python "<skill folder>/scripts/autopilot.py" validate --live    # optional probe
 python "<skill folder>/scripts/autopilot.py" run                # start
 python "<skill folder>/scripts/autopilot.py" status             # monitor
+python "<skill folder>/scripts/autopilot.py" follow             # watch it live, read-only
 python "<skill folder>/scripts/autopilot.py" stop               # stop safely
 python "<skill folder>/scripts/autopilot.py" resume             # continue
 ```
@@ -121,8 +122,9 @@ a run can end. If this session runs on Haiku, stop and ask to switch with `/mode
    ```
 
    Use `resume --supervised` when `status` shows an earlier run, or when `run` refuses to start.
-3. Tell the owner the session is listening, and end the turn. Do not poll: the command's end
-   wakes this session, at the first block or anomaly.
+3. Tell the owner the session is listening and that a read-only Bash window follows this project's
+   run live, and end the turn. Do not poll: the command's end wakes this session, at the first block
+   or anomaly.
 4. On waking, follow the reference. Fix what you can; `defer` what only a person can do and report
    it; then start the runner again in the background. Repeat until the plan is complete or
    nothing can go on without the owner.

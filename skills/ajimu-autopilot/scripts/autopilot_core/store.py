@@ -111,13 +111,14 @@ class RunnerLock:
             return {'pid': -1, 'host': socket.gethostname(), 'corrupt': True}
 
     @staticmethod
-    def _owner_is_live(owner):
+    def owner_is_live(owner):
+        """Tell whether the process in `owner` lives. Another host's lock counts, as it cannot be inspected."""
         return owner.get('host') != socket.gethostname() or pid_alive(int(owner.get('pid', -1)))
 
     def is_active(self):
-        """Tell whether a live process owns the lock. Another host's lock counts, as it cannot be inspected."""
+        """Tell whether a live process owns the lock."""
         owner = self.owner()
-        return owner is not None and self._owner_is_live(owner)
+        return owner is not None and self.owner_is_live(owner)
 
     def acquire(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -128,7 +129,7 @@ class RunnerLock:
                 owner = self.owner()
                 if owner is None:
                     continue
-                if self._owner_is_live(owner):
+                if self.owner_is_live(owner):
                     raise LockHeld(owner)
                 try:
                     self.path.unlink()

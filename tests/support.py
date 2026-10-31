@@ -14,6 +14,8 @@ SCRIPTS = SKILL / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / 'fixtures' / 'fake_claude.py'
+# Inherited by every run the tests start, in this process or a child, so no real window opens.
+os.environ['AJIMU_AUTOPILOT_NO_WINDOW'] = '1'
 
 
 def ready_preflight(task_id, task_type='feature_standard', model='sonnet', effort='medium', **overrides):

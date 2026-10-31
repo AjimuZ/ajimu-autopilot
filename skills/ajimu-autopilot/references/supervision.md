@@ -15,12 +15,15 @@ what only a person can do so that the rest can go on.
 ## The loop
 
 1. Start the runner with the shell tool's background option (`run_in_background`), never in the
-   foreground, where a tool timeout would end it. Keep exactly one runner at a time.
+   foreground, where a tool timeout would end it. Keep exactly one runner per project. Runs in the
+   owner's other projects are independent and none of this session's business.
 
    ```bash
    python "<skill folder>/scripts/autopilot.py" run --supervised      # or resume --supervised
    ```
 
+   The run opens a read-only Bash window for the owner, one per project, and reuses it on restarts.
+   If its output says `no window was opened`, pass that line on, because it holds the command to use instead.
 2. Tell the owner the run is under way, and end the turn. Do not poll, write a watch loop or set
    a timer. The end of the background command wakes this session: a supervised run exits at the
    first block or anomaly, on a task boundary, with nothing in flight.
@@ -120,3 +123,5 @@ When the owner has answered:
 - **A permission prompt holds the run** until someone answers it. Approve the runner's commands for
   this session if the owner may walk away.
 - **Each wake-up is a turn of this session,** which costs usage on top of the run's own.
+- **The window is only for the owner to watch.** Closing it does not affect the run, and it says nothing
+  this session needs: go by the command's output and `status`.

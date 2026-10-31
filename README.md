@@ -20,6 +20,7 @@ finished task is checked by the runner itself, reviewed, documented, committed a
 - **Commit and push per task,** confirmed against the remote, with no duplicates after a crash.
 - **Safe recovery:** stop, reboot or crash, then resume. Partial work is never discarded.
 - **Supervised runs:** the session that starts the run stays listening and fixes what stops it.
+- **A live window per project:** a read-only Bash window follows each supervised run in real time.
 - **Work that needs a person** is reported and set aside, and the rest goes on without it.
 - **Limited permissions:** no permission bypass, explicit allowlists, and hard limits.
 
@@ -102,6 +103,7 @@ python "$HOME/.claude/skills/ajimu-autopilot/scripts/autopilot.py" resume       
 | `stop` | End the current session or check safely and save state |
 | `pause` | End the run after the current attempt, interrupting nothing |
 | `status [--json]` | Tasks, iteration, selection, checks, last commit and push, errors, what needs you |
+| `follow` | Show the run in real time, read-only, until interrupted |
 | `defer --task ID --reason TEXT` | Set a task aside until you act, recording what you have to do |
 | `unblock --task ID [--restore-work]` | Requeue a blocked task after you resolve its cause, optionally with its partial work |
 | `preflight --task ID` | Run one preflight without implementing |
@@ -113,7 +115,8 @@ configuration, 3 paused and resumable, 4 only blocked tasks remain, 5 a limit wa
 Configuration is in `.ajimu-autopilot/config.json`: limits, checks, branch, routing overrides
 and permissions. Each check is an object such as `{"name": "test", "command": "npm test",
 "required": true}`. If Claude Code is not on `PATH`, the runner looks for the binary bundled with
-the VS Code extension; otherwise set `claude.command` or `AJIMU_AUTOPILOT_CLAUDE`.
+the VS Code extension; otherwise set `claude.command` or `AJIMU_AUTOPILOT_CLAUDE`. Set
+`AJIMU_AUTOPILOT_NO_WINDOW=1` to keep supervised runs from opening a window.
 
 ## Architecture
 
@@ -290,6 +293,21 @@ active, `pause` first: it ends after the current attempt, interrupting nothing.
 selected model and effort, check results, the last commit and push, estimated spend and recent
 errors. It reads files only, so it works during a run. Add `--json` for scripts.
 
+A supervised run also opens a **Bash window that follows it in real time**: what the runner reports,
+and what each session says and which tools it calls.
+
+- **Each project has its own window,** with the project's name in the title, so you can run the skill
+  on several projects at once. The session restarting a run reuses its window.
+- **It is read-only.** It takes no input and sends nothing to the run, so closing it changes nothing.
+  The next start of a supervised run opens it again. Once a run ends it stays open, to show how the run ended and to
+  follow that project's next run, until you close it.
+- **`follow` shows the same view** in any terminal, for any run of the project, from any number of
+  terminals. A window is opened for supervised runs only, because a plain `run` already shows its
+  output in its terminal.
+
+The window is Git Bash on Windows and the first terminal emulator found on Linux. When it cannot be
+opened, the run goes on, and its output gives the `follow` command to use instead.
+
 ## Error recovery
 
 | Situation | Behavior |
@@ -324,6 +342,11 @@ What has actually been run, with Claude Code 2.1.314:
   not tried, and the same steps have not run on Linux or macOS.
 - **`pause`, `unblock --restore-work` and the pause on a repeated failure** ran with scripted sessions
   only, in the offline suite.
+- **The window of a supervised run was tried on Windows 11 with Windows Terminal,** on two projects at
+  once with scripted sessions, started as a background command of Claude Code in VS Code. It has not
+  followed real sessions yet, and what stopping a background command does to it was not tried. On
+  Linux, only the launch logic ran, against stand-ins for the terminal. macOS gets no window, only
+  the `follow` command.
 - **macOS is untested,** and Linux has not run against a real model. The code uses standard POSIX
   calls and the same logic, but expect to report problems there.
 - **Some paths were only exercised with scripted sessions:** usage limits and the wait for their

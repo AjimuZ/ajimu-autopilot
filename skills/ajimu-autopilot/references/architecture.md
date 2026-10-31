@@ -27,7 +27,8 @@ Then the task is blocked, its partial work preserved, and independent tasks cont
 
 A `--supervised` run differs in one way: at the first new block or anomaly it exits at the
 next boundary, so that the session that started it can act on a quiet tree. Each item is
-raised once, so `resume` goes on without the blocked task.
+raised once, so `resume` goes on without the blocked task. It also opens the project's
+read-only window, a separate process that only reads the logs and cannot affect the run.
 
 ## Task states
 
@@ -56,6 +57,7 @@ Illegal transitions raise an error. State is written before each risky step.
 | `project.py` | Project layout, configuration, setup, progress file |
 | `runner.py` | State machine, recovery, the loop |
 | `doctor.py` | Validation and live probes |
+| `follow.py` | The read-only view of a run, and its per-project window |
 
 `routing.py`, `preflight.py` and `prd.py` do no I/O beyond reading their assets, so they
 can be tested without launching anything.
@@ -63,7 +65,7 @@ can be tested without launching anything.
 ## Commands
 
 `setup`, `import-roadmap`, `validate [--live]`, `run`, `resume`, `stop`, `pause`,
-`status [--json]`, `unblock --task ID [--restore-work]`, `defer --task ID --reason TEXT`,
+`status [--json]`, `follow`, `unblock --task ID [--restore-work]`, `defer --task ID --reason TEXT`,
 `preflight --task ID`, `route --task-type TYPE`. All accept `--project PATH` except `route`.
 `run` and `resume` accept `--max-iterations N`, `--task ID` and `--supervised`.
 

@@ -61,6 +61,8 @@ class Project:
         self.stop_path = self.runtime_dir / 'STOP'
         self.pause_path = self.runtime_dir / 'PAUSE'
         self.errors_path = self.runtime_dir / 'errors.log'
+        self.run_log_path = self.runtime_dir / 'run.log'
+        self.viewer_lock_path = self.runtime_dir / 'viewer.lock'
         self.capabilities_path = self.runtime_dir / 'capabilities.json'
         self.logs_dir = self.runtime_dir / 'logs'
 

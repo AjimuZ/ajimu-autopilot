@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from autopilot_core import __version__, claude_cli, doctor, gitops, preflight, project as project_module, roadmap, routing  # noqa: E402
+from autopilot_core import __version__, claude_cli, doctor, follow, gitops, preflight, project as project_module, roadmap, routing  # noqa: E402
 from autopilot_core import prd as prd_module  # noqa: E402
 from autopilot_core import runner as runner_module  # noqa: E402
 from autopilot_core.store import LockHeld, RunnerLock, read_json  # noqa: E402
@@ -270,6 +270,19 @@ def command_status(args):
     return 0
 
 
+def command_follow(args):
+    """Show the run until interrupted. `--window` makes this view its project's only window."""
+    project = configured_project(args.project)
+    try:
+        if args.window:
+            with RunnerLock(project.viewer_lock_path):
+                follow.follow(project)
+        else:
+            follow.follow(project)
+    except (KeyboardInterrupt, LockHeld):
+        return 0
+
+
 def positive_int(text):
     value = int(text)
     if value <= 0:
@@ -309,6 +322,8 @@ def build_parser():
     add('pause', command_pause, 'Ask the active runner to end after its current attempt, interrupting nothing.')
     sub = add('status', command_status, 'Show tasks, iteration, selection, checks, commit, push and errors.')
     sub.add_argument('--json', action='store_true')
+    sub = add('follow', command_follow, 'Show the run in real time, read-only, until interrupted.')
+    sub.add_argument('--window', action='store_true', help='end at once if this project already has its window open')
     sub = add('unblock', command_unblock, 'Return a blocked task to the queue after you resolved its cause.')
     sub.add_argument('--task', required=True)
     sub.add_argument('--restore-work', action='store_true',

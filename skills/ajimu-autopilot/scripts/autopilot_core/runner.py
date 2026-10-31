@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import claude_cli, conventions, gitops, preflight, project as project_module, quality, routing
+from . import claude_cli, conventions, follow, gitops, preflight, project as project_module, quality, routing
 from . import prd as prd_module
 from .store import RunnerLock, read_json, utc_now, write_json_atomic, write_text_atomic
 
@@ -80,7 +80,7 @@ class Runner:
         self.supervised = supervised
         self.attention = []
         self.base_env = base_env
-        self.output = output
+        self.print_output = output
         self.clock = clock
         self.sleep = sleep
         self.state = None
@@ -146,6 +146,19 @@ class Runner:
         with open(path, 'a', encoding='utf-8') as handle:
             handle.write(json.dumps({'at': utc_now(), 'task': task_id, 'message': message[:2000]}) + '\n')
 
+    def output(self, message):
+        """Report `message` where the run was started and in the log its window follows."""
+        self.append_run_log(message)
+        self.print_output(message)
+
+    def append_run_log(self, message):
+        """Add `message` to run.log with the local time. Failing to is no reason to end a run."""
+        try:
+            with open(self.project.run_log_path, 'a', encoding='utf-8', errors='replace') as handle:
+                handle.write(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} {message}\n')
+        except OSError:
+            pass
+
     def stop_requested(self):
         return self.project.stop_path.exists()
 
@@ -162,6 +175,12 @@ class Runner:
             self.output('configuration problems:\n- ' + '\n- '.join(problems))
             return EXIT_USAGE
         with RunnerLock(self.project.lock_path):
+            self.append_run_log('--- run started ---')
+            # Only a supervised run: its output goes to a background task nobody can watch, while
+            # a run in a terminal already shows it and may have no desktop to open a window on.
+            problem = follow.open_window(self.project) if self.supervised else None
+            if problem:
+                self.output(problem)
             self.load_state()
             try:
                 self.prepare()
@@ -764,6 +783,7 @@ class Runner:
     def verify(self, item, output, model, effort, mode='implementation'):
         """Return (findings, check_report) from the runner's checks and an independent review."""
         findings = []
+        self.output(f'{item["id"]}: running the project checks')
         checks = quality.run_checks(self.project.root, self.config['checks'],
                                     self.config['limits']['check_timeout_minutes'] * 60, self.stop_requested)
         if checks['stopped']:

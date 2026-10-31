@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.5.0 - 2026-10-31
+
+### Added
+
+- A supervised run opens a Bash window that follows it in real time, read-only: what the runner
+  reports, and what each session says and does. Each project gets its own window, titled with its
+  name, so runs in several projects at once stay apart. Restarts reuse the window, and closing it
+  does not affect the run. Set `AJIMU_AUTOPILOT_NO_WINDOW=1` to turn it off.
+- `follow` shows the same view in any terminal, for any run.
+- What the runner reports is also kept in `.ajimu-autopilot/runtime/run.log`.
+
+### Changed
+
+- The runner reports when it starts a task's project checks, which can take a while.
+
 ## 1.4.0 - 2026-10-31
 
 ### Added

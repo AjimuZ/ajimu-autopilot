@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.4.0 - 2026-10-31
+
+### Added
+
+- `/ajimu-autopilot run` and `/ajimu-autopilot resume` start the runner from the session, which stays
+  listening and fixes what stops it. The rules are in `references/supervision.md`.
+- `run --supervised` and `resume --supervised` exit at the first new block or anomaly, on a task
+  boundary, for the session that started them to act. An anomaly is a blocked task, a task failing
+  the same way in two consecutive attempts, or a session changing the plan. A usage limit is not one:
+  the runner keeps waiting by itself, without waking a session that could not act anyway.
+- `defer --task ID --reason TEXT` sets aside a task that needs a person and records what they have
+  to do. The run goes on without it, and `status` and every run report it until it is brought back.
+- `unblock --restore-work` brings back the partial work a block set aside, for the next session to
+  continue from under the usual checks, review and commit.
+- `pause` ends a run after its current attempt, interrupting nothing.
+- `status` shows how many tasks wait on blocked ones.
+
+### Changed
+
+- The output of a run is written line by line, so it can be read while the run works in the background.
+
+### Fixed
+
+- A block no longer erases the task's notes, and `unblock` removes only the line the block added.
+  Notes are how a person passes instructions to the next session.
+- Project checks and hooks no longer inherit the variables of a Claude Code session that started the
+  run, which include the channel into that session. Sessions no longer inherit `CLAUDE_EFFORT`,
+  `CLAUDE_CODE_EXECPATH` or `AI_AGENT` either.
+
 ## 1.3.1 - 2026-10-30
 
 ### Fixed

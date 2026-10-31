@@ -844,6 +844,17 @@ class RunnerTests(Sandbox):
         self.assertEqual(runner_module.EXIT_COMPLETE, self.runner().run(), self.lines)
         self.assertEqual(2, len(self.launches('implementation')))
 
+    def test_pause_request_ends_a_usage_wait_because_nothing_is_in_flight(self):
+        self.layout = self.make_repository([self.story()])
+        phases = self.happy()
+        phases['implementation'].insert(0, {**self.LIMITED, 'edits': self.edit(content='partial\n')})
+        self.scenario(**phases)
+        worker, _ = self.waiting_runner(on_sleep=lambda: runner_module.request_pause(self.project))
+        self.assertEqual(runner_module.EXIT_PAUSED, worker.run(), self.lines)
+        self.assertEqual('partial\n', (self.project / 'app.txt').read_text(encoding='utf-8'))
+        self.assertEqual(runner_module.EXIT_COMPLETE, self.runner().run(), self.lines)
+        self.assertEqual(2, len(self.launches('implementation')))
+
     def test_interrupt_during_a_usage_wait_pauses_and_resume_continues(self):
         self.layout = self.make_repository([self.story()])
         phases = self.happy()
@@ -1219,6 +1230,282 @@ class DefaultBranchTests(Sandbox):
         self.assertEqual(0, result.returncode, result.stdout)
         self.assertIn('[warn] working branch exists: main does not exist', result.stdout)
         self.assertTrue(layout.config_path.is_file())
+
+
+@unittest.skipUnless(conventions.locate(), 'ajimu-conventions is not installed')
+class SupervisedRunTests(Sandbox):
+    """A supervised run ends at the first thing its session has to act on, and goes on when resumed."""
+
+    BLOCKED = 'Needs a key'
+
+    def cli(self, *args, **env):
+        return subprocess.run([sys.executable, str(SCRIPTS / 'autopilot.py'), *args, '--project', str(self.project)],
+                              capture_output=True, text=True, env={**os.environ, 'PYTHONIOENCODING': 'utf-8', **env})
+
+    def state(self):
+        return read_json(self.layout.state_path)
+
+    def message(self):
+        return self.state()['run']['message']
+
+    def notes(self, task_id='T-1'):
+        return prd.story(prd.load(self.layout.prd_path), task_id)['notes']
+
+    def work(self, name='app.txt', content='changed\n', subject='Add greeting output'):
+        return {'edits': self.edit(name, content), 'structured': done_output(subject)}
+
+    def blocked(self, task_id='T-1'):
+        return {'structured': ready_preflight(task_id, outcome='blocked', blocked_reason=self.BLOCKED)}
+
+    def two_tasks(self):
+        self.layout = self.make_repository([self.story(), self.story('T-2', priority=2)])
+
+    # ---- when a run ends ------------------------------------------------------------
+
+    def test_a_block_ends_the_run_before_the_next_task_and_resume_goes_on_without_it(self):
+        self.two_tasks()
+        self.scenario(preflight=[self.blocked(), {'structured': ready_preflight('T-2')}],
+                      implementation=[self.work()], review=[{'structured': review_pass()}])
+        self.assertEqual(runner_module.EXIT_PAUSED, self.runner(supervised=True).run(), self.lines)
+        self.assertEqual(1, len(self.launches()), 'the next task was not paid for')
+        self.assertIn(f'attention: T-1 is blocked (block 1 of this task): {self.BLOCKED}', self.message())
+        self.assertIn(str(runner_module.SUPERVISION_GUIDE), self.message())
+        self.assertFalse(self.layout.lock_path.exists())
+        self.assertEqual(runner_module.EXIT_BLOCKED, self.runner(supervised=True).run(), self.lines)
+        self.assertEqual('completed', self.state()['tasks']['T-2']['status'])
+        self.assertNotIn('attention', self.message(), 'the block was raised once')
+
+    def test_a_block_with_nothing_left_to_run_still_reports_it(self):
+        self.layout = self.make_repository([self.story()])
+        self.scenario(preflight=[self.blocked()])
+        self.assertEqual(runner_module.EXIT_BLOCKED, self.runner(supervised=True).run(), self.lines)
+        self.assertIn('attention: T-1 is blocked', self.message())
+        self.assertIn(str(runner_module.SUPERVISION_GUIDE), self.message())
+        self.assertNotIn('resume', self.message(), 'restarting here would only loop')
+
+    def test_the_same_failure_twice_ends_the_run_once(self):
+        self.layout = self.make_repository([self.story()])
+        broken = self.work(content='BROKEN\n')
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}], implementation=[broken, broken, broken])
+        self.assertEqual(runner_module.EXIT_PAUSED, self.runner(supervised=True).run(), self.lines)
+        self.assertEqual(2, len(self.launches('implementation')), 'the first failure goes to the normal retry')
+        self.assertIn('attempt 2 failed like the one before it: check "test" failed', self.message())
+        self.assertEqual('ready', self.state()['tasks']['T-1']['status'])
+        self.assertEqual('BROKEN\n', (self.project / 'app.txt').read_text(encoding='utf-8'), 'the work stays in place')
+        self.assertEqual(runner_module.EXIT_BLOCKED, self.runner(supervised=True).run(), self.lines)
+        self.assertEqual(3, len(self.launches('implementation')))
+        self.assertEqual('blocked', self.state()['tasks']['T-1']['status'])
+
+    def test_a_different_failure_is_left_to_the_retries(self):
+        self.layout = self.make_repository([self.story()])
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}], review=[{'structured': review_pass()}],
+                      implementation=[self.work(content='BROKEN\n'),
+                                      {**self.work(content='BROKEN\n'), 'structured': done_output(conventions_ack='wrong')},
+                                      self.work()])
+        self.assertEqual(runner_module.EXIT_COMPLETE, self.runner(supervised=True).run(), self.lines)
+        self.assertEqual(3, len(self.launches('implementation')))
+
+    def test_a_session_changing_the_plan_ends_the_run_after_its_task(self):
+        self.two_tasks()
+        forged = self.layout.prd_path.read_text(encoding='utf-8').replace('"passes": false', '"passes": true')
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}], review=[{'structured': review_pass()}],
+                      implementation=[{'edits': {**self.edit(), str(self.layout.prd_path): forged},
+                                       'structured': done_output()}])
+        self.assertEqual(runner_module.EXIT_PAUSED, self.runner(supervised=True).run(), self.lines)
+        self.assertIn('attention: T-1: a session changed prd.json; the runner restored it', self.message())
+        self.assertEqual(1, len(self.launches('preflight')))
+
+    def test_an_anomaly_is_reported_even_when_the_plan_completes(self):
+        self.layout = self.make_repository([self.story()])
+        forged = self.layout.prd_path.read_text(encoding='utf-8').replace('"passes": false', '"passes": true')
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}], review=[{'structured': review_pass()}],
+                      implementation=[{'edits': {**self.edit(), str(self.layout.prd_path): forged},
+                                       'structured': done_output()}])
+        self.assertEqual(runner_module.EXIT_COMPLETE, self.runner(supervised=True).run(), self.lines)
+        self.assertIn('a session changed prd.json', self.message())
+
+    def test_a_requested_stop_does_not_invite_carrying_on(self):
+        self.layout = self.make_repository([self.story()])
+        runner_module.request_stop(self.project)
+        self.assertEqual(runner_module.EXIT_PAUSED, self.runner(supervised=True).run(), self.lines)
+        self.assertNotIn(str(runner_module.SUPERVISION_GUIDE), self.message())
+
+    def test_a_clean_supervised_run_says_nothing_more(self):
+        self.layout = self.make_repository([self.story()])
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}], implementation=[self.work()],
+                      review=[{'structured': review_pass()}])
+        self.assertEqual(runner_module.EXIT_COMPLETE, self.runner(supervised=True).run(), self.lines)
+        self.assertEqual('all tasks are complete and published', self.message())
+
+    def test_an_unsupervised_run_reports_as_before(self):
+        self.two_tasks()
+        self.scenario(preflight=[self.blocked(), {'structured': ready_preflight('T-2')}],
+                      implementation=[self.work()], review=[{'structured': review_pass()}])
+        self.assertEqual(runner_module.EXIT_BLOCKED, self.runner().run(), self.lines)
+        self.assertEqual('no runnable task: 1 blocked (T-1), 0 waiting on them', self.message())
+
+    # ---- what needs a person --------------------------------------------------------
+
+    def test_a_deferred_task_is_skipped_reported_and_brought_back(self):
+        self.layout = self.make_repository([self.story(), self.story('T-2', priority=2),
+                                            self.story('T-3', priority=3, dependsOn=['T-1'])])
+        request = 'Provide the API key'
+        result = self.cli('defer', '--task', 'T-1', '--reason', request)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual([], self.launches(), 'setting a task aside costs no session')
+        status = json.loads(self.cli('status', '--json').stdout)
+        self.assertEqual(request, status['blocked'][0]['needs_owner'])
+        self.assertEqual({'T-3': ['T-1']}, status['waiting_on_blocked'])
+        human = self.cli('status').stdout
+        self.assertIn(f'  needs you: {request}', human)
+        self.assertIn('waiting on blocked tasks: 1', human)
+
+        self.scenario(preflight=[{'structured': ready_preflight('T-2')}], implementation=[self.work()],
+                      review=[{'structured': review_pass()}])
+        result = self.cli('run', '--supervised')
+        self.assertEqual(runner_module.EXIT_BLOCKED, result.returncode, result.stdout + result.stderr)
+        self.assertIn(f'T-1 stays set aside and needs you: {request}', result.stdout)
+        self.assertIn(f'T-1 needs you: {request}', result.stdout)
+        self.assertNotIn('attention', result.stdout, 'a task already set aside does not end the run again')
+        self.assertEqual('completed', self.state()['tasks']['T-2']['status'])
+
+        self.assertEqual(0, self.cli('unblock', '--task', 'T-1').returncode)
+        self.assertEqual([], json.loads(self.cli('status', '--json').stdout)['blocked'])
+        self.assertIsNone(self.state()['tasks']['T-1']['needs_owner'], 'a later block must not repeat an old request')
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}, {'structured': ready_preflight('T-3')}],
+                      implementation=[self.work('other.txt', 'one\n', 'Add other output'),
+                                      self.work('third.txt', 'two\n', 'Add third output')],
+                      review=[{'structured': review_pass()}, {'structured': review_pass()}])
+        result = self.cli('resume', '--supervised')
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual({'completed'}, {entry['status'] for entry in self.state()['tasks'].values()})
+
+    def test_deferring_a_task_with_partial_work_sets_the_work_aside(self):
+        self.layout = self.make_repository([self.story()])
+        broken = self.work(content='BROKEN\n')
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}], implementation=[broken, broken])
+        self.assertEqual(runner_module.EXIT_PAUSED, self.runner(supervised=True).run(), self.lines)
+        result = self.cli('defer', '--task', 'T-1', '--reason', 'Restart the database')
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        entry = self.state()['tasks']['T-1']
+        self.assertEqual(('blocked', 'Restart the database'), (entry['status'], entry['needs_owner']['request']))
+        self.assertIn('BROKEN', self.git('show', f'{entry["preserved_commit"]}:app.txt'))
+        self.assertEqual('base\n', (self.project / 'app.txt').read_text(encoding='utf-8'))
+
+    def test_defer_refuses_what_it_cannot_set_aside(self):
+        self.layout = self.make_repository([self.story()])
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}], implementation=[self.work()],
+                      review=[{'structured': review_pass()}])
+        self.assertEqual(runner_module.EXIT_COMPLETE, self.runner().run(), self.lines)
+        finished = self.cli('defer', '--task', 'T-1', '--reason', 'x')
+        self.assertEqual(runner_module.EXIT_USAGE, finished.returncode)
+        self.assertIn('nothing to set aside', finished.stderr)
+        unknown = self.cli('defer', '--task', 'T-9', '--reason', 'x')
+        self.assertEqual(runner_module.EXIT_USAGE, unknown.returncode)
+        self.assertIn('unknown task', unknown.stderr)
+        with RunnerLock(self.layout.lock_path):
+            active = self.cli('defer', '--task', 'T-1', '--reason', 'x')
+        self.assertEqual(runner_module.EXIT_USAGE, active.returncode)
+        self.assertIn('another runner is active', active.stderr)
+
+    # ---- picking work up again -------------------------------------------------------
+
+    def block_with_partial_work(self):
+        self.layout = self.make_repository([self.story()])
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}], implementation=[{
+            'edits': {**self.edit(content='partial\n'), **self.edit('new.txt', 'new file\n')},
+            'structured': done_output(status='blocked', blocked_reason='A file is denied')}])
+        self.assertEqual(runner_module.EXIT_BLOCKED, self.runner().run(), self.lines)
+        self.assertEqual('base\n', (self.project / 'app.txt').read_text(encoding='utf-8'))
+
+    def test_restored_work_goes_through_the_normal_verification_and_commit(self):
+        self.block_with_partial_work()
+        result = self.cli('unblock', '--task', 'T-1', '--restore-work')
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn('partial work back in the tree', result.stdout)
+        self.assertEqual('partial\n', (self.project / 'app.txt').read_text(encoding='utf-8'))
+        self.assertEqual('new file\n', (self.project / 'new.txt').read_text(encoding='utf-8'))
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}], implementation=[self.work(content='done\n')],
+                      review=[{'structured': review_pass()}])
+        self.assertEqual(runner_module.EXIT_COMPLETE, self.runner().run(), self.lines)
+        self.assertIn('A previous attempt was interrupted', self.launches('implementation')[-1]['prompt'])
+        self.assertEqual(['review'], [e['phase'] for e in self.launches()][-1:], 'an independent review still ran')
+        changed = self.git('show', '--name-only', '--format=', 'HEAD').splitlines()
+        self.assertIn('new.txt', changed)
+        self.assertIn('Task: T-1', self.git('log', '-1', '--format=%B'))
+
+    def test_restoring_work_refuses_a_tree_with_other_changes(self):
+        self.block_with_partial_work()
+        (self.project / 'app.txt').write_text('mine\n', encoding='utf-8')
+        result = self.cli('unblock', '--task', 'T-1', '--restore-work')
+        self.assertEqual(runner_module.EXIT_ERROR, result.returncode, result.stdout)
+        self.assertIn('uncommitted changes', result.stderr)
+        self.assertEqual('blocked', self.state()['tasks']['T-1']['status'])
+        self.assertEqual('mine\n', (self.project / 'app.txt').read_text(encoding='utf-8'))
+
+    def test_restoring_work_says_when_there_was_none(self):
+        self.layout = self.make_repository([self.story()])
+        self.scenario(preflight=[self.blocked()])
+        self.assertEqual(runner_module.EXIT_BLOCKED, self.runner().run(), self.lines)
+        result = self.cli('unblock', '--task', 'T-1', '--restore-work')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('no partial work had been set aside', result.stdout)
+        self.assertEqual('pending', self.state()['tasks']['T-1']['status'])
+
+    def test_a_block_and_an_unblock_keep_the_notes_written_for_the_task(self):
+        self.layout = self.make_repository([self.story(notes='Call scripts/x.sh exactly')])
+        self.BLOCKED = 'Needs\na key'
+        self.scenario(preflight=[self.blocked(), self.blocked()])
+        self.assertEqual(runner_module.EXIT_BLOCKED, self.runner().run(), self.lines)
+        self.assertEqual('BLOCKED: Needs a key\nCall scripts/x.sh exactly', self.notes())
+        runner_module.unblock(self.project, 'T-1')
+        self.assertEqual('Call scripts/x.sh exactly', self.notes())
+        self.assertEqual(runner_module.EXIT_BLOCKED, self.runner().run(), self.lines)
+        self.assertEqual(1, self.notes().count('BLOCKED'))
+        plan = prd.load(self.layout.prd_path)
+        plan['userStories'][0]['notes'] += '\nAlso use Y'
+        prd.save(self.layout.prd_path, plan)
+        runner_module.unblock(self.project, 'T-1')
+        self.assertEqual('Call scripts/x.sh exactly\nAlso use Y', self.notes())
+
+    # ---- pausing ---------------------------------------------------------------------
+
+    def test_pause_ends_the_run_after_the_current_attempt_and_the_next_start_clears_it(self):
+        self.two_tasks()
+        finished = {**self.work(), 'edits': {**self.edit(), str(self.layout.pause_path): 'now\n'}}
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}, {'structured': ready_preflight('T-2')}],
+                      implementation=[finished, self.work('other.txt', 'ok\n', 'Add other output')],
+                      review=[{'structured': review_pass()}, {'structured': review_pass()}])
+        self.assertEqual(runner_module.EXIT_PAUSED, self.runner().run(), self.lines)
+        self.assertIn('paused after the current attempt', self.message())
+        self.assertEqual('completed', self.state()['tasks']['T-1']['status'], 'nothing was interrupted')
+        self.assertEqual(1, len(self.launches('preflight')))
+        self.assertEqual(runner_module.EXIT_COMPLETE, self.runner().run(), self.lines)
+        self.assertFalse(self.layout.pause_path.exists())
+
+    def test_pause_needs_an_active_runner(self):
+        self.layout = self.make_repository([self.story()])
+        idle = self.cli('pause')
+        self.assertEqual(runner_module.EXIT_USAGE, idle.returncode)
+        self.assertFalse(self.layout.pause_path.exists())
+        with RunnerLock(self.layout.lock_path):
+            active = self.cli('pause')
+        self.assertEqual(0, active.returncode, active.stderr)
+        self.assertTrue(self.layout.pause_path.exists())
+
+    # ---- started from a session ------------------------------------------------------
+
+    def test_project_code_does_not_inherit_the_channel_into_the_session(self):
+        self.layout = self.make_repository([self.story()])
+        config = self.layout.config()
+        config['checks'] = [{'name': 'test', 'required': True, 'command':
+                             f'"{sys.executable}" -c "import os,sys; sys.exit(1 if os.environ.get(\'CLAUDE_CODE_MESSAGING_TOKEN\') else 0)"'}]
+        write_json_atomic(self.layout.config_path, config)
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}], implementation=[self.work()],
+                      review=[{'structured': review_pass()}])
+        result = self.cli('run', '--supervised', CLAUDE_CODE_MESSAGING_TOKEN='parent', CLAUDECODE='1', CLAUDE_EFFORT='low')
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertFalse({'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDECODE', 'CLAUDE_EFFORT'} & set(self.launches()[0]['env']))
 
 
 @unittest.skipUnless(conventions.locate(), 'ajimu-conventions is not installed')

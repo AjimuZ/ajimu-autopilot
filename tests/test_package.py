@@ -11,10 +11,11 @@ import unittest
 from pathlib import Path
 
 from support import ROOT, SCRIPTS, SKILL
-from autopilot_core import conventions, doctor, preflight, processes, project as project_module, quality, routing
+from autopilot_core import conventions, doctor, preflight, processes, project as project_module, quality, routing, runner
 
 REQUIRED_REFERENCES = ('architecture', 'project-analysis', 'roadmap', 'task-preflight', 'model-routing',
-                       'ralph-integration', 'persistent-memory', 'ajimu-conventions', 'git-workflow', 'safety')
+                       'ralph-integration', 'persistent-memory', 'ajimu-conventions', 'git-workflow', 'safety',
+                       'supervision')
 
 
 def run_tool(*args):
@@ -91,11 +92,14 @@ class PackageTests(unittest.TestCase):
         for task_type, (model, effort) in routing.POLICY.items():
             self.assertIn(f'| {task_type} | {model} | {effort} |', prompt)
 
-    def test_readme_commands_exist_in_the_cli(self):
-        readme = (ROOT / 'README.md').read_text(encoding='utf-8')
+    def test_documented_commands_exist_in_the_cli(self):
         help_text = run_tool(SCRIPTS / 'autopilot.py', '--help').stdout
-        for command in set(re.findall(r'autopilot\.py"? ([a-z-]+)', readme)):
-            self.assertIn(command, help_text, command)
+        for path in (ROOT / 'README.md', SKILL / 'SKILL.md', SKILL / 'references' / 'supervision.md'):
+            for command in set(re.findall(r'autopilot\.py"? ([a-z-]+)', path.read_text(encoding='utf-8'))):
+                self.assertIn(command, help_text, f'{path.name}: {command}')
+
+    def test_a_supervised_run_points_at_a_guide_that_exists(self):
+        self.assertTrue(runner.SUPERVISION_GUIDE.is_file())
 
 
 class InstallerTests(unittest.TestCase):

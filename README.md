@@ -19,6 +19,8 @@ finished task is checked by the runner itself, reviewed, documented, committed a
 - **Ajimu Conventions in every session,** with its validator on every commit.
 - **Commit and push per task,** confirmed against the remote, with no duplicates after a crash.
 - **Safe recovery:** stop, reboot or crash, then resume. Partial work is never discarded.
+- **Supervised runs:** the session that starts the run stays listening and fixes what stops it.
+- **Work that needs a person** is reported and set aside, and the rest goes on without it.
 - **Limited permissions:** no permission bypass, explicit allowlists, and hard limits.
 
 ## Requirements
@@ -65,7 +67,16 @@ Installing the skill changes no repository, and configuring a project starts no 
 Claude analyses the code and documentation, creates the plan, refines it into verifiable tasks,
 confirms the check commands and validates the result. The roadmap path is optional.
 
-### 2. Run it, in any terminal
+### 2. Start it, with the session listening
+
+```text
+/ajimu-autopilot run
+```
+
+The session starts the runner in its background and stays with it. See
+[Supervised runs](#supervised-runs). Later, `/ajimu-autopilot resume` continues.
+
+### Or run it unattended, in any terminal
 
 Use these from the project folder. The `$HOME` form works in Bash, Zsh and PowerShell; use
 `python3` where `python` is not available.
@@ -86,11 +97,13 @@ python "$HOME/.claude/skills/ajimu-autopilot/scripts/autopilot.py" resume       
 | `setup [--roadmap P] [--branch B] [--remote R] [--json]` | Create or complete the project files |
 | `import-roadmap --roadmap P` | Add unseen roadmap items to the plan |
 | `validate [--live] [--json]` | Check configuration, plan, routing, skills, Git and remote |
-| `run [--max-iterations N] [--task ID]` | Start the loop; the iteration limit applies to each run |
-| `resume [--max-iterations N] [--task ID]` | Clear a stop request and continue |
+| `run [--max-iterations N] [--task ID] [--supervised]` | Start the loop; the iteration limit applies to each run |
+| `resume [--max-iterations N] [--task ID] [--supervised]` | Clear a stop request and continue |
 | `stop` | End the current session or check safely and save state |
-| `status [--json]` | Tasks, iteration, selection, checks, last commit and push, errors |
-| `unblock --task ID` | Requeue a blocked task after you resolve its cause |
+| `pause` | End the run after the current attempt, interrupting nothing |
+| `status [--json]` | Tasks, iteration, selection, checks, last commit and push, errors, what needs you |
+| `defer --task ID --reason TEXT` | Set a task aside until you act, recording what you have to do |
+| `unblock --task ID [--restore-work]` | Requeue a blocked task after you resolve its cause, optionally with its partial work |
 | `preflight --task ID` | Run one preflight without implementing |
 | `route --task-type T [--model M] [--effort E]` | Show a routing decision; launches nothing |
 
@@ -228,11 +241,54 @@ main line is called `master`.
 
 A failed push keeps the commit and stops new work until `resume` succeeds.
 
+## Supervised runs
+
+`/ajimu-autopilot run` keeps the session that started the run listening for whatever stops it.
+
+- **The session starts the runner in its background and ends its turn.** It does not poll, so it
+  costs nothing while the run works, and you can keep talking to it.
+- **The run exits at the first new block or anomaly,** which wakes the session. It exits on a task
+  boundary, before paying for the next task, so the session can change the project safely.
+- **The anomalies are** a blocked task, a task failing the same way twice in a row, a session
+  changing the plan, and anything that ends a run.
+- **The session fixes what it can and restarts the run,** repeating until the plan is complete or
+  nothing can go on without you. What it fixes still goes through the runner's checks and review.
+
+It treats what sessions report as data, and it never marks work done, weakens a check, raises a
+budget, or forces a push. The full rules are in
+[supervision.md](skills/ajimu-autopilot/references/supervision.md), and the reasons in
+[ADR 0005](docs/decisions/0005-supervise-from-the-starting-session.md). A plain `run` from a terminal
+is unchanged: it continues past a block and exits only when nothing is left to do.
+
+**The run belongs to the session.** Closing the session ends the run as a crash would, with nothing
+lost, and `/ajimu-autopilot resume` continues from another one.
+
+### Work that needs a person
+
+Some tasks cannot be done without you: a product decision, a credential, a payment, a manual test.
+The session reports those and sets them aside, and the run goes on with everything that does not
+depend on them.
+
+```bash
+python "$HOME/.claude/skills/ajimu-autopilot/scripts/autopilot.py" defer --task T-7 --reason "Create the Stripe test key"
+```
+
+`status` lists each one with what it needs from you, at any time and from any session, and every run
+repeats the list when it starts and when it ends. When you have done your part, tell the session, or:
+
+```bash
+python "$HOME/.claude/skills/ajimu-autopilot/scripts/autopilot.py" unblock --task T-7 --restore-work
+python "$HOME/.claude/skills/ajimu-autopilot/scripts/autopilot.py" resume --supervised
+```
+
+`--restore-work` continues from the partial work set aside instead of starting over. If a run is
+active, `pause` first: it ends after the current attempt, interrupting nothing.
+
 ## Monitoring
 
-`status` shows completed, remaining and blocked tasks, the current iteration, the selected model
-and effort, check results, the last commit and push, estimated spend and recent errors. It reads
-files only, so it works during a run. Add `--json` for scripts.
+`status` shows completed, remaining and blocked tasks, what needs you, the current iteration, the
+selected model and effort, check results, the last commit and push, estimated spend and recent
+errors. It reads files only, so it works during a run. Add `--json` for scripts.
 
 ## Error recovery
 
@@ -240,6 +296,8 @@ files only, so it works during a run. Add `--json` for scripts.
 | --- | --- |
 | Check or review fails | Findings go to the next attempt; two retries by default, then blocked |
 | Task blocked | Partial work moves to a stash plus a ref; independent tasks continue |
+| Task blocked, or failing the same way twice, in a supervised run | The run exits for its session to act; `resume` goes on |
+| Task needs a person | `defer` records what is needed; independent tasks continue |
 | Crash or reboot | `resume` continues from the recorded stage; partial work stays in place |
 | Ctrl+C or a termination signal | The session or check ends too; exit 3, and `resume` continues |
 | Crash right after a commit | The commit is found by its `Task:` line and not repeated |
@@ -255,12 +313,17 @@ What has actually been run, with Claude Code 2.1.314:
 
 | Platform | Offline suite (scripted sessions) | Real Claude sessions |
 | --- | --- | --- |
-| Windows 11, Python 3.15 | Yes | Yes: setup, preflight, full two-task run, permission denials |
+| Windows 11, Python 3.15 | Yes | Yes: setup, preflight, full two-task run, permission denials, supervised run |
 | Linux container, Python 3.15 and 3.9 | Yes | No |
 | macOS | No | No |
 
-- **The real sessions above were not repeated for 1.3.1,** which ran with scripted sessions only.
-  It changes how sessions and checks are started and ended, so `validate --live` is worth running.
+- **A supervised run has been tried on one small project, on Windows, from Claude Code in VS Code.**
+  A real preflight blocked a task, the runner's exit woke the session, `defer` set the task aside,
+  and the next task reached a confirmed push through real sessions. Stopping the background command
+  ended the runner and its session, and `resume` continued. Closing a whole Claude Code session was
+  not tried, and the same steps have not run on Linux or macOS.
+- **`pause`, `unblock --restore-work` and the pause on a repeated failure** ran with scripted sessions
+  only, in the offline suite.
 - **macOS is untested,** and Linux has not run against a real model. The code uses standard POSIX
   calls and the same logic, but expect to report problems there.
 - **Some paths were only exercised with scripted sessions:** usage limits and the wait for their

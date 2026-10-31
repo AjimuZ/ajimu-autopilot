@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """Command line of Ajimu Autopilot: configure, validate, run, resume, stop and monitor a project.
 
-Run it from any terminal, independent of the Claude Code session that configured the
-project. Exit status: 0 finished, 1 error, 2 usage or configuration, 3 paused and
-resumable, 4 only blocked tasks remain, 5 a limit was reached.
+Run it from any terminal, or from a Claude Code session that stays to supervise the run
+(`run --supervised`, in the background). Exit status: 0 finished, 1 error, 2 usage or
+configuration, 3 paused and resumable, 4 only blocked tasks remain, 5 a limit was reached.
 """
 import argparse
 import json
+import os
 import signal
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from autopilot_core import __version__, doctor, gitops, preflight, project as project_module, roadmap, routing  # noqa: E402
+from autopilot_core import __version__, claude_cli, doctor, gitops, preflight, project as project_module, roadmap, routing  # noqa: E402
 from autopilot_core import prd as prd_module  # noqa: E402
 from autopilot_core import runner as runner_module  # noqa: E402
 from autopilot_core.store import LockHeld, RunnerLock, read_json  # noqa: E402
@@ -42,7 +43,8 @@ def command_setup(args):
         print('already configured; nothing changed')
     for warning in report['warnings']:
         print(f'warning: {warning}')
-    print('Development has not started. Review the plan, then run "validate" and "run" from a terminal.')
+    print('Development has not started. Review the plan and run "validate". Then start it with /ajimu-autopilot run '
+          'inside Claude Code, or with "run" from a terminal.')
     return 0
 
 
@@ -74,7 +76,8 @@ def _run(args, resume):
         if lock.is_active():
             raise LockHeld(lock.owner())
         runner_module.clear_stop(args.project)
-    worker = runner_module.Runner(args.project, max_iterations=args.max_iterations, only_task=args.task)
+    worker = runner_module.Runner(args.project, max_iterations=args.max_iterations, only_task=args.task,
+                                  supervised=args.supervised)
     return worker.run()
 
 
@@ -93,13 +96,44 @@ def command_stop(args):
     return 0
 
 
+def command_pause(args):
+    project = configured_project(args.project)
+    # A request no runner would read could only surprise a later one.
+    if not RunnerLock(project.lock_path).is_active():
+        print('no runner is active; there is nothing to pause', file=sys.stderr)
+        return runner_module.EXIT_USAGE
+    runner_module.request_pause(project.root)
+    print('pause requested; the runner ends after its current attempt, interrupting nothing')
+    return 0
+
+
 def command_unblock(args):
     try:
-        runner_module.unblock(configured_project(args.project).root, args.task)
+        restored = runner_module.unblock(configured_project(args.project).root, args.task, args.restore_work)
     except KeyError as error:
         print(error.args[0], file=sys.stderr)
         return runner_module.EXIT_USAGE
-    print(f'{args.task} is pending again; run "resume" to continue')
+    if restored:
+        print(f'{args.task} is ready again, with its partial work back in the tree; run "resume" to continue')
+    else:
+        print(f'{args.task} is pending again{"; no partial work had been set aside" if args.restore_work else ""}; '
+              'run "resume" to continue')
+    return 0
+
+
+def command_defer(args):
+    worker = runner_module.Runner(configured_project(args.project).root)
+    try:
+        with RunnerLock(worker.project.lock_path):
+            worker.load_state()
+            worker.defer(args.task, args.reason)
+    except KeyError:
+        print(f'unknown task: {args.task}', file=sys.stderr)
+        return runner_module.EXIT_USAGE
+    except runner_module.Halt as halt:
+        print(halt.message, file=sys.stderr)
+        return halt.code
+    print(f'{args.task} is set aside until you act; "unblock --task {args.task}" brings it back')
     return 0
 
 
@@ -158,7 +192,8 @@ def build_status(root):
             completed.append(item['id'])
         elif status == 'blocked':
             blocked.append({'id': item['id'], 'reason': entry.get('blocked_reason'),
-                            'preserved_commit': entry.get('preserved_commit')})
+                            'preserved_commit': entry.get('preserved_commit'),
+                            'needs_owner': (entry.get('needs_owner') or {}).get('request')})
         else:
             remaining.append({'id': item['id'], 'status': status})
     current = state.get('current_task')
@@ -191,7 +226,7 @@ def build_status(root):
         'stop_requested': project.stop_path.exists(),
         'iteration': state.get('iteration', 0), 'max_iterations': config['limits']['max_iterations'],
         'current_task': current, 'completed': completed, 'remaining': remaining, 'blocked': blocked,
-        'selection': selected, 'latest_checks': latest_checks, 'last_commit': state.get('last_commit') or
+        'waiting_on_blocked': prd_module.waiting_on_blocked(plan, tasks), 'selection': selected, 'latest_checks': latest_checks, 'last_commit': state.get('last_commit') or
         (git.head() if git.has_commits() else None), 'last_push': state.get('last_push'),
         'spent_usd_estimate': state.get('spent_usd', 0), 'recent_errors': errors,
     }
@@ -219,6 +254,10 @@ def command_status(args):
         print(f'selection: {selection["task"]} -> {selection["model"]} / {selection["effort"]} ({selection.get("reason") or "no reason"})')
     for item in status['blocked']:
         print(f'blocked: {item["id"]}: {item["reason"]}')
+        if item['needs_owner']:
+            print(f'  needs you: {item["needs_owner"]}')
+    if status['waiting_on_blocked']:
+        print(f'waiting on blocked tasks: {len(status["waiting_on_blocked"])}')
     if status['latest_checks']:
         checks = status['latest_checks']
         summary = ', '.join(f'{c["name"]}={"pass" if c["passed"] else "FAIL"}' for c in checks['results'])
@@ -264,11 +303,19 @@ def build_parser():
         sub = add(name, handler, text)
         sub.add_argument('--max-iterations', type=positive_int, help='override limits.max_iterations for this run')
         sub.add_argument('--task', help='work only on this task')
+        sub.add_argument('--supervised', action='store_true',
+                         help='end the run at the first block or anomaly, for the session that started it to act on')
     add('stop', command_stop, 'Ask the active runner to stop safely.')
+    add('pause', command_pause, 'Ask the active runner to end after its current attempt, interrupting nothing.')
     sub = add('status', command_status, 'Show tasks, iteration, selection, checks, commit, push and errors.')
     sub.add_argument('--json', action='store_true')
     sub = add('unblock', command_unblock, 'Return a blocked task to the queue after you resolved its cause.')
     sub.add_argument('--task', required=True)
+    sub.add_argument('--restore-work', action='store_true',
+                     help='bring back the partial work its block set aside, for the next session to continue')
+    sub = add('defer', command_defer, 'Set a task aside until a person acts; the run goes on without it.')
+    sub.add_argument('--task', required=True)
+    sub.add_argument('--reason', required=True, help='what a person has to do before the task can continue')
     sub = add('preflight', command_preflight, 'Run and save the preflight of one task, without implementing it.')
     sub.add_argument('--task', required=True)
     sub = add('route', command_route, 'Show the routing decision for a task type; launches nothing.')
@@ -286,9 +333,14 @@ def interrupt(*_):
 
 def main(argv=None):
     # Task titles can hold characters a Windows console cannot encode, which must not end a run.
+    # Line buffering keeps the output of a run started in the background readable while it works.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, 'reconfigure'):
-            stream.reconfigure(errors='replace')
+            stream.reconfigure(errors='replace', line_buffering=True)
+    # Project checks and hooks run code this process does not control. Started from a Claude Code
+    # session, they must not inherit the channel into that session, which has wider permissions.
+    for name in claude_cli.SESSION_VARIABLES:
+        os.environ.pop(name, None)
     # A closed terminal or a `kill` must end the running session too, as Ctrl+C does, instead of orphaning it.
     for name in ('SIGTERM', 'SIGHUP', 'SIGBREAK'):
         if hasattr(signal, name):

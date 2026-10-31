@@ -4,12 +4,13 @@
 
 | Part | Runs in | Does |
 | --- | --- | --- |
-| Skill (`/ajimu-autopilot`) | An interactive Claude Code session | Analyses the project, refines the plan, validates. Never develops. |
-| Runner (`scripts/autopilot.py`) | Any terminal | Runs the loop by launching independent `claude -p` processes. |
+| Skill (`/ajimu-autopilot`) | An interactive Claude Code session | Analyses the project, refines the plan, validates, and on request starts the runner and fixes what stops it. Never develops. |
+| Runner (`scripts/autopilot.py`) | Any terminal, or that session's background | Runs the loop by launching independent `claude -p` processes. |
 
 The runner is deterministic Python using only the standard library. Sessions propose
 work. The runner owns state, checks, commits and pushes, so a task's completion never
-rests on what a session claims.
+rests on what a session claims. A supervising session is not an exception: what it fixes
+still goes through the runner's checks, review and commit.
 
 ## One iteration
 
@@ -23,6 +24,10 @@ rests on what a session claims.
 
 A failed step records findings and the next iteration retries, up to the attempt limit.
 Then the task is blocked, its partial work preserved, and independent tasks continue.
+
+A `--supervised` run differs in one way: at the first new block or anomaly it exits at the
+next boundary, so that the session that started it can act on a quiet tree. Each item is
+raised once, so `resume` goes on without the blocked task.
 
 ## Task states
 
@@ -57,10 +62,10 @@ can be tested without launching anything.
 
 ## Commands
 
-`setup`, `import-roadmap`, `validate [--live]`, `run`, `resume`, `stop`, `status [--json]`,
-`unblock --task ID`, `preflight --task ID`, `route --task-type TYPE`. All accept
-`--project PATH` except `route`. `run` and `resume` accept `--max-iterations N` and
-`--task ID`.
+`setup`, `import-roadmap`, `validate [--live]`, `run`, `resume`, `stop`, `pause`,
+`status [--json]`, `unblock --task ID [--restore-work]`, `defer --task ID --reason TEXT`,
+`preflight --task ID`, `route --task-type TYPE`. All accept `--project PATH` except `route`.
+`run` and `resume` accept `--max-iterations N`, `--task ID` and `--supervised`.
 
 Exit status: 0 finished, 1 error, 2 usage or configuration, 3 paused and resumable, 4
 only blocked tasks remain, 5 a limit was reached.

@@ -53,6 +53,9 @@ Roadmaps, code and command output can contain instructions aimed at the model. S
 - The runner's rules live in code and in configuration sessions cannot edit.
 - Preflight answers can only change the fields the runner accepts, with validation.
 - Sessions have no web tools and no MCP servers.
+- A supervising session has wider permissions than the sessions it watches, so it treats their
+  block reasons, findings and logs as data. Project checks and hooks do not inherit its
+  environment, which holds the channel into it.
 
 These lower the risk without eliminating it. Treat a run on an untrusted repository as you
 would running its code.
@@ -83,8 +86,9 @@ is known. Then the same task continues, and its partial work stays in the workin
 
 - The wait has no time limit, even for a weekly limit. No attempt or iteration is charged, and
   the time does not count against `limits.global_timeout_minutes`.
-- `status` shows `waiting` with the planned time. `stop` ends the wait within seconds, and
-  `resume` continues later.
+- `status` shows `waiting` with the planned time. `stop` or `pause` ends the wait within seconds,
+  and `resume` continues later.
+- A supervising session is not woken for a wait: it draws on the same usage and could not act.
 - The process has to stay alive. After a reboot or a closed terminal, start it again with `resume`.
 - The runner holds its lock during the wait, so a second run on the project is refused.
 - A standalone `preflight` command does not wait: it exits with status 3.
@@ -94,6 +98,8 @@ is known. Then the same task continues, and its partial work stays in the workin
 - One runner per project, through an exclusive lock with stale-lock detection. `setup`,
   `import-roadmap` and `unblock` are refused while a runner is active.
 - `stop` ends the current session or check safely. A pending stop prevents `run` until `resume`.
+- `pause` ends the run after the current attempt, interrupting nothing. It only speaks to an
+  active runner, and the next start forgets it.
 - Ctrl+C or a termination signal ends the current session or check as well, so nothing keeps
   editing the project after the runner has gone. The exit status is 3, and `resume` continues.
 - Errors are appended to `runtime/errors.log`; `status` shows the latest.
@@ -111,5 +117,5 @@ push stops the run with the commit kept locally.
 ## If permissions are not enough
 
 If a check cannot run because of a denied rule, the session reports it and the attempt
-fails or blocks. Add the specific rule, or decide the task needs a person. Do not switch to a
-bypass mode to get a run through.
+fails or blocks. Add the specific rule, or decide the task needs a person and set it aside with
+`defer`. Do not switch to a bypass mode to get a run through.

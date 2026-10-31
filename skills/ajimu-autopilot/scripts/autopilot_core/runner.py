@@ -45,6 +45,9 @@ SHELL_DENY = ('Bash(sudo *)', 'Bash(rm -rf *)', 'Bash(rm -fr *)', 'Bash(curl *)'
               'Bash(scp *)', 'Bash(npm publish *)', 'Bash(gh *)')
 RESET_MARGIN_SECONDS = 60
 WAIT_TICK_SECONDS = 5
+SUPERVISION_GUIDE = Path(__file__).resolve().parents[2] / 'references' / 'supervision.md'
+BLOCK_NOTE = 'BLOCKED: '
+BLOCK_NOTE_LIMIT = 600
 
 
 class Halt(Exception):
@@ -66,14 +69,16 @@ class UsageLimit(Halt):
 
 
 class Runner:
-    def __init__(self, root, *, max_iterations=None, only_task=None, base_env=None, output=print, clock=time.time,
-                 sleep=time.sleep):
+    def __init__(self, root, *, max_iterations=None, only_task=None, supervised=False, base_env=None, output=print,
+                 clock=time.time, sleep=time.sleep):
         self.project = project_module.Project(root)
         self.config = self.project.config()
         self.project.ensure_runtime()
         self.git = gitops.Git(self.project.root)
         self.max_iterations = max_iterations or self.config['limits']['max_iterations']
         self.only_task = only_task
+        self.supervised = supervised
+        self.attention = []
         self.base_env = base_env
         self.output = output
         self.clock = clock
@@ -179,18 +184,40 @@ class Runner:
     def finish(self, code, message):
         status = {EXIT_COMPLETE: 'complete', EXIT_PAUSED: 'paused', EXIT_BLOCKED: 'blocked',
                   EXIT_LIMIT: 'limit'}.get(code, 'failed')
+        if self.supervised:
+            message = self.supervision_report(code, message)
         self.state['run'].update(status=status, ended_at=utc_now(), message=message)
         self.save_state()
         self.output(message)
+
+    def supervision_report(self, code, message):
+        """Return `message` with what needs attention and where the next step is described.
+
+        The way forward travels with the message because the session reading it may have
+        lost the skill's text to context compaction. It names no command, because restarting
+        is wrong for some endings: with only tasks waiting for a person it would just loop. A
+        stop asked for by a person is left as it is, since nothing should carry on from it.
+        """
+        lines = [message] + [f'attention: {item}' for item in self.attention]
+        if (code != EXIT_COMPLETE or self.attention) and not self.stop_requested():
+            lines.append(f'Act as {SUPERVISION_GUIDE} describes.')
+        return '\n'.join(lines)
+
+    def owner_requests(self):
+        """Return [(task, what a person has to do)] for the tasks set aside with `defer`."""
+        return [(task_id, entry['needs_owner']['request']) for task_id, entry in self.state['tasks'].items()
+                if entry['status'] == 'blocked' and entry.get('needs_owner')]
 
     def prepare(self):
         """Verify the preconditions of unattended work, then recover any interrupted task.
 
         The iteration count restarts here because the limit applies to one run: `resume`
-        has to be able to continue after reaching it.
+        has to be able to continue after reaching it. So does a pause request, which spoke
+        to a runner that has gone.
         """
         self.state['run'] = {'status': 'running', 'started_at': utc_now()}
         self.state['iteration'] = 0
+        self.project.pause_path.unlink(missing_ok=True)
         self.deadline = time.monotonic() + self.config['limits']['global_timeout_minutes'] * 60
         self.command = claude_cli.find_claude(self.config['claude'].get('command'), self.base_env)
         if not self.command:
@@ -226,6 +253,8 @@ class Runner:
             self.checkpoint('Record autonomous plan updates')
         self.load_capabilities()
         self.save_state()
+        for task_id, request in self.owner_requests():
+            self.output(f'{task_id} stays set aside and needs you: {request}')
 
     def reconcile_remote(self):
         """Compare local and remote history; publish what is only local, stop on anything else.
@@ -334,6 +363,7 @@ class Runner:
             if item is None:
                 return self.conclude(plan, statuses)
             # After the check for remaining work, so that a last task crossing a limit still reads as complete.
+            self.check_attention()
             self.check_limits()
             if self.state['iteration'] >= self.max_iterations:
                 message = f'iteration limit reached ({self.max_iterations}); run "resume" to continue'
@@ -371,7 +401,8 @@ class Runner:
             remaining = until - self.clock()
             if remaining <= 0:
                 break
-            if self.stop_requested():
+            # Nothing is in flight during a wait, so a pause request needs no task boundary.
+            if self.stop_requested() or self.project.pause_path.exists():
                 raise Halt(EXIT_PAUSED, 'stop requested while waiting for usage; run "resume" to continue')
             self.sleep(min(WAIT_TICK_SECONDS, remaining))
         self.deadline += self.clock() - now
@@ -398,12 +429,25 @@ class Runner:
             self.finish(EXIT_COMPLETE if self.only_task not in remaining else EXIT_BLOCKED, f'{self.only_task} processed')
             return EXIT_COMPLETE if self.only_task not in remaining else EXIT_BLOCKED
         message = f'no runnable task: {len(blocked)} blocked ({", ".join(blocked)}), {len(waiting)} waiting on them'
-        self.finish(EXIT_BLOCKED, message)
+        self.finish(EXIT_BLOCKED, '\n'.join([message] + [f'{task_id} needs you: {request}'
+                                                         for task_id, request in self.owner_requests()]))
         return EXIT_BLOCKED
+
+    def check_attention(self):
+        """End a supervised run at this boundary when something needs its session.
+
+        Nothing is in flight here and a block has already set its partial work aside, so the
+        session can change the project without racing a task, and the next task has not been
+        paid for yet. Each item is raised once: `resume` goes on without the task it named.
+        """
+        if self.supervised and self.attention:
+            raise Halt(EXIT_PAUSED, 'supervised run paused before the next task')
 
     def check_limits(self):
         if self.stop_requested():
             raise Halt(EXIT_PAUSED, 'stop requested; run "resume" to continue')
+        if self.project.pause_path.exists():
+            raise Halt(EXIT_PAUSED, 'paused after the current attempt, as requested; run "resume" to continue')
         if self.deadline and time.monotonic() > self.deadline:
             raise Halt(EXIT_LIMIT, 'global timeout reached; run "resume" to continue')
         limit = self.config['limits'].get('max_budget_usd_total')
@@ -673,6 +717,7 @@ class Runner:
             current = path.read_bytes() if path.exists() else None
             if current != content:
                 self.log_error(f'a session changed {path.name}; the runner restored it', task_id)
+                self.attention.append(f'{task_id}: a session changed {path.name}; the runner restored it')
                 if content is not None:
                     path.write_bytes(content)
 
@@ -802,6 +847,11 @@ class Runner:
         self.save_record(record)
         self.log_error('; '.join(findings)[:1500], task_id)
         self.output(f'{task_id}: attempt {execution["attempt"]} failed: {findings[0][:200]}')
+        # The same failure twice suggests another full session will not help. On the last attempt the block says so.
+        repeated = first_lines(findings) & first_lines(self.entry(task_id).get('findings'))
+        if repeated and execution['attempt'] <= self.config['limits']['max_fix_attempts']:
+            self.attention.append(f'{task_id}: attempt {execution["attempt"]} failed like the one before it: '
+                                  f'{sorted(repeated)[0][:300]}')
         self.transition(task_id, 'ready', findings=findings)
 
     def build_message(self, subject, body, task_id):
@@ -949,13 +999,33 @@ class Runner:
         record['blockers'].append({'at': utc_now(), 'reason': reason, 'preserved_commit': preserved})
         self.save_record(record)
         plan = self.plan()
-        prd_module.story(plan, task_id)['notes'] = f'BLOCKED: {reason}'[:600]
+        item = prd_module.story(plan, task_id)
+        item['notes'] = with_block_note(item.get('notes'), reason)
         prd_module.save(self.project.prd_path, plan)
         # Interrupted work has just been set aside, so a later attempt must not be told to continue from it.
         self.transition(task_id, 'blocked', blocked_reason=reason, preserved_commit=preserved, interrupted=False)
         self.log_error(f'blocked: {reason}', task_id)
         self.output(f'{task_id}: BLOCKED: {reason}')
+        self.attention.append(f'{task_id} is blocked (block {len(record["blockers"])} of this task): {reason}')
         self.checkpoint(f'Record blocked task {task_id}', task_id)
+
+    def defer(self, task_id, request):
+        """Set an open task aside until a person acts, recording what they have to do.
+
+        Runs go on without it, tasks depending on it wait, and `unblock` brings it back. A
+        task not blocked yet is blocked now, which also sets its partial work aside. Requires
+        the project lock and a loaded state. Raises KeyError for an unknown task, ValueError
+        for one already committed, and Halt when the block cannot be recorded.
+        """
+        prd_module.story(self.plan(), task_id)
+        entry = self.entry(task_id)
+        if entry['status'] in ('completed', 'committing', 'pushing'):
+            raise ValueError(f'{task_id} is {entry["status"]}; there is nothing to set aside')
+        entry['needs_owner'] = {'request': request, 'at': utc_now()}
+        self.save_state()
+        if entry['status'] != 'blocked':
+            self.prepare_for_single_phase()
+            self.block(task_id, f'waiting for a person: {request}')
 
     def complete_already_implemented(self, task_id, accepted):
         """Accept an "already implemented" claim only after independent verification.
@@ -996,6 +1066,28 @@ def summarize_checks(report):
     return [{key: check[key] for key in ('name', 'passed', 'exit_code')} for check in report.get('results', [])]
 
 
+def first_lines(findings):
+    """Return the set of findings' first lines, which name a failure without its changing output."""
+    return {finding.split('\n', 1)[0] for finding in findings or []}
+
+
+def without_block_note(notes):
+    """Return task notes without the line `with_block_note` adds; anything written by hand stays."""
+    first, _, rest = (notes or '').partition('\n')
+    return rest if first.startswith(BLOCK_NOTE) else notes or ''
+
+
+def with_block_note(notes, reason):
+    """Return task notes led by a block's reason, on one line, keeping what they said before.
+
+    Notes are how a person passes instructions to the next session, so a block must not
+    cost the task what was written there.
+    """
+    line = (BLOCK_NOTE + ' '.join(reason.split()))[:BLOCK_NOTE_LIMIT]
+    kept = without_block_note(notes)
+    return f'{line}\n{kept}' if kept else line
+
+
 def effective_status(item, status):
     """Return a task's status once prd.json, the authority on completion, is taken into account.
 
@@ -1011,15 +1103,24 @@ def request_stop(root):
     write_text_atomic(project_module.Project(root).stop_path, utc_now() + '\n')
 
 
+def request_pause(root):
+    """Ask the active runner to end after its current attempt, interrupting nothing."""
+    write_text_atomic(project_module.Project(root).pause_path, utc_now() + '\n')
+
+
 def clear_stop(root):
     Path(project_module.Project(root).stop_path).unlink(missing_ok=True)
 
 
-def unblock(root, task_id):
-    """Return a blocked task to the queue with fresh attempts.
+def unblock(root, task_id, restore_work=False):
+    """Return a blocked task to the queue with fresh attempts; return whether work came back.
 
-    Raises KeyError for unknown tasks and LockHeld while a runner is active, because its
-    next save would discard this change.
+    With `restore_work` the partial work its block set aside returns to the tree, and the
+    next session is told to continue from it, under the usual checks, review and commit.
+    Findings stay in that case, because they describe that work. Raises KeyError for
+    unknown tasks, LockHeld while a runner is active, because its next save would discard
+    this change, and gitops.GitError when the work cannot be restored; nothing else
+    changes then.
     """
     project = project_module.Project(root)
     with RunnerLock(project.lock_path):
@@ -1027,8 +1128,14 @@ def unblock(root, task_id):
         entry = (state.get('tasks') or {}).get(task_id)
         if not entry or entry.get('status') != 'blocked':
             raise KeyError(f'{task_id} is not blocked')
-        entry.update(status='pending', attempts=0, findings=[], blocked_reason=None)
+        preserved = entry.get('preserved_commit') if restore_work else None
+        if preserved:
+            gitops.Git(project.root).apply_preserved(preserved)
+        entry.update(status='ready' if preserved else 'pending', attempts=0, blocked_reason=None, needs_owner=None,
+                     interrupted=bool(preserved), findings=(entry.get('findings') or []) if preserved else [])
         write_json_atomic(project.state_path, state)
         plan = prd_module.load(project.prd_path)
-        prd_module.story(plan, task_id)['notes'] = ''
+        item = prd_module.story(plan, task_id)
+        item['notes'] = without_block_note(item.get('notes'))
         prd_module.save(project.prd_path, plan)
+    return bool(preserved)

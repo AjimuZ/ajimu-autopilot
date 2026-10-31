@@ -10,7 +10,7 @@
 | `.ajimu-autopilot/tasks/<ID>.json` | No | Original text, corrections, latest preflight, executions, blockers |
 | `CLAUDE.md` | Yes | Stable project conventions, updated by sessions when useful |
 | Roadmap, changelog, docs, ADRs | Yes | Requirements and decisions |
-| `.ajimu-autopilot/runtime/` | No | Live state, lock, stop flag, session logs, errors, model probe |
+| `.ajimu-autopilot/runtime/` | No | Live state, what tasks need from a person, lock, stop and pause flags, session logs, errors, model probe |
 
 The whole `.ajimu-autopilot/` folder stays local. Setup and the runner add it to the project's
 `.gitignore`, and a rule the owner already wrote in another form is respected. The runner

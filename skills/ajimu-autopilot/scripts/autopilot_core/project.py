@@ -59,6 +59,7 @@ class Project:
         self.state_path = self.runtime_dir / 'state.json'
         self.lock_path = self.runtime_dir / 'runner.lock'
         self.stop_path = self.runtime_dir / 'STOP'
+        self.pause_path = self.runtime_dir / 'PAUSE'
         self.errors_path = self.runtime_dir / 'errors.log'
         self.capabilities_path = self.runtime_dir / 'capabilities.json'
         self.logs_dir = self.runtime_dir / 'logs'

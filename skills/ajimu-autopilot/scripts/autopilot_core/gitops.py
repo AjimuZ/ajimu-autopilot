@@ -242,6 +242,17 @@ class Git:
         self.run('update-ref', f'refs/ajimu-autopilot/preserved/{safe_label}', sha)
         return sha
 
+    def apply_preserved(self, commit):
+        """Bring work set aside by `preserve_foreign_changes` back to the tree; the snapshot stays reachable.
+
+        Raises GitError when project files have uncommitted changes, which the work could
+        collide with, or when it does not apply cleanly. After a conflict the markers are in
+        the tree for a person to resolve or undo.
+        """
+        if self.foreign_changes():
+            raise GitError('uncommitted changes exist; deal with them before restoring preserved work')
+        self.run('stash', 'apply', '--quiet', commit)
+
     def added_lines(self):
         """Return (path, added line) for tracked changes against HEAD.
 

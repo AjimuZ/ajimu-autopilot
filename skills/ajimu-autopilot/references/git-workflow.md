@@ -67,4 +67,12 @@ git stash apply <stash>
 ```
 
 After resolving the cause, `unblock --task <ID>` returns the task to the queue with fresh
-attempts. If the work should be dropped instead, edit the plan.
+attempts. `unblock --task <ID> --restore-work` also brings the partial work back to the tree,
+and the next session continues from it under the usual checks, review and commit. It refuses a
+tree with other uncommitted changes. If the work should be dropped instead, edit the plan.
+
+A block adds a `BLOCKED:` line at the top of the task's `notes` and keeps the rest; `unblock`
+removes only that line. Notes are how a person passes instructions to the next session.
+
+`defer --task <ID> --reason <text>` records what a person has to do. A task not blocked yet is
+blocked then, with the same handling of its partial work.

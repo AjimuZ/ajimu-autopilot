@@ -119,9 +119,10 @@ class CommandLineTests(unittest.TestCase):
     def test_environment_overrides_are_removed_and_background_model_pinned(self):
         env = claude_cli.child_environment(self.request(sonnet_id='claude-sonnet-5-5'), {
             'PATH': 'x', 'ANTHROPIC_MODEL': 'claude-haiku-5-5', 'ANTHROPIC_SMALL_FAST_MODEL': 'claude-haiku-5-5',
-            'CLAUDE_CODE_EFFORT_LEVEL': 'low', 'CLAUDECODE': '1', 'CLAUDE_CODE_SESSION_ID': 'parent'})
+            'CLAUDE_CODE_EFFORT_LEVEL': 'low', 'CLAUDECODE': '1', 'CLAUDE_CODE_SESSION_ID': 'parent', 'CLAUDE_EFFORT': 'low',
+            'CLAUDE_CODE_EXECPATH': 'x', 'AI_AGENT': 'x'})
         for name in ('ANTHROPIC_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDECODE',
-                     'CLAUDE_CODE_SESSION_ID'):
+                     'CLAUDE_CODE_SESSION_ID', 'CLAUDE_EFFORT', 'CLAUDE_CODE_EXECPATH', 'AI_AGENT'):
             self.assertNotIn(name, env)
         self.assertEqual('claude-sonnet-5-5', env['ANTHROPIC_DEFAULT_HAIKU_MODEL'])
         self.assertEqual('sonnet', env['CLAUDE_CODE_SUBAGENT_MODEL'])

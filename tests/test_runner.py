@@ -1110,33 +1110,36 @@ class RunnerTests(Sandbox):
         self.assertEqual(0, self.runner().run(), self.lines)
         self.assertEqual(2, len(self.launches('implementation')))
 
-    def test_session_budget_stop_is_reported_and_refunds_the_attempt(self):
-        self.layout = self.make_repository([self.story()])
-        phases = self.happy()
-        phases['implementation'] = [{'subtype': 'error_max_budget_usd', 'is_error': True}]
-        self.scenario(**phases)
-        self.assertEqual(runner_module.EXIT_LIMIT, self.runner().run())
-        self.assertIn('per-session budget', self.lines[-1])
-        self.assertEqual(0, self.state()['tasks']['T-1']['attempts'])
-
-    def test_total_budget_limit_stops_before_new_work(self):
+    def test_budget_settings_of_earlier_releases_limit_nothing(self):
         self.layout = self.make_repository([self.story(), self.story('T-2', priority=2)])
         config = self.layout.config()
-        config['limits']['max_budget_usd_total'] = 0.001
+        config['limits'].update(max_budget_usd_per_session=0.001, max_budget_usd_total=0.001)
         write_json_atomic(self.layout.config_path, config)
-        self.scenario(**self.happy())
-        self.assertEqual(runner_module.EXIT_LIMIT, self.runner().run())
-        self.assertIn('estimated spend', self.lines[-1])
-        self.assertTrue(self.launches())
-        self.assertEqual(['preflight', 'implementation', 'review'], [e['phase'] for e in self.launches()])
+        self.scenario(preflight=[{'structured': ready_preflight('T-1')}, {'structured': ready_preflight('T-2')}],
+                      implementation=[{'edits': self.edit(), 'structured': done_output()},
+                                      {'edits': self.edit('b.txt', 'b\n'), 'structured': done_output('Add the second file')}],
+                      review=[{'structured': review_pass()}, {'structured': review_pass()}])
+        self.assertEqual(runner_module.EXIT_COMPLETE, self.runner().run(), self.lines)
+        self.assertEqual(6, len(self.launches()))
+        for launch in self.launches():
+            self.assertNotIn('--max-budget-usd', launch['argv'])
+
+    def test_setup_removes_the_budget_settings_of_earlier_releases(self):
+        from autopilot_core import project as project_module
+        self.layout = self.make_repository([self.story()])
+        config = self.layout.config()
+        config['limits'].update(max_budget_usd_per_session=25, max_budget_usd_total=150, max_iterations=7)
+        write_json_atomic(self.layout.config_path, config)
+        project_module.setup(self.project)
+        stored = read_json(self.layout.config_path)['limits']
+        self.assertNotIn('max_budget_usd_per_session', stored)
+        self.assertNotIn('max_budget_usd_total', stored)
+        self.assertEqual(7, stored['max_iterations'])
 
     def test_limit_crossed_by_the_last_task_still_reports_completion(self):
         self.layout = self.make_repository([self.story()])
-        config = self.layout.config()
-        config['limits']['max_budget_usd_total'] = 0.001
-        write_json_atomic(self.layout.config_path, config)
         self.scenario(**self.happy())
-        self.assertEqual(runner_module.EXIT_COMPLETE, self.runner().run(), self.lines)
+        self.assertEqual(runner_module.EXIT_COMPLETE, self.runner(max_iterations=1).run(), self.lines)
         self.assertEqual('complete', self.state()['run']['status'])
 
     def test_unblock_requeues_the_task(self):
@@ -1267,7 +1270,7 @@ class SupervisedRunTests(Sandbox):
         self.scenario(preflight=[self.blocked(), {'structured': ready_preflight('T-2')}],
                       implementation=[self.work()], review=[{'structured': review_pass()}])
         self.assertEqual(runner_module.EXIT_PAUSED, self.runner(supervised=True).run(), self.lines)
-        self.assertEqual(1, len(self.launches()), 'the next task was not paid for')
+        self.assertEqual(1, len(self.launches()), 'the next task did not start')
         self.assertIn(f'attention: T-1 is blocked (block 1 of this task): {self.BLOCKED}', self.message())
         self.assertIn(str(runner_module.SUPERVISION_GUIDE), self.message())
         self.assertFalse(self.layout.lock_path.exists())

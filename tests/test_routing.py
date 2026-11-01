@@ -141,13 +141,12 @@ class CommandLineTests(unittest.TestCase):
 
 class StreamTests(unittest.TestCase):
     def test_line_separators_inside_a_string_do_not_lose_the_result(self):
-        event = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'a b\u0085c', 'total_cost_usd': 0.5}
+        event = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'a b\u0085c'}
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch) / 'stream.jsonl'
             path.write_text('not json\n' + json.dumps(event, ensure_ascii=False) + '\n', encoding='utf-8')
             result = claude_cli.parse_stream(path)
         self.assertTrue(result.has_result)
-        self.assertEqual(0.5, result.cost_usd)
         self.assertEqual('a b\u0085c', result.result_text)
 
     def test_synthetic_entries_are_not_models_that_ran(self):

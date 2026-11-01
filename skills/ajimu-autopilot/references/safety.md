@@ -71,11 +71,10 @@ would running its code.
 | `limits.usage_retry_minutes` | 5 | Retry interval during a usage wait with no known reset time |
 | `limits.check_timeout_minutes` | 20 | Ends a check and everything it started; fails the check |
 | `limits.global_timeout_minutes` | 720 | Stops the run; `resume` continues |
-| `limits.max_budget_usd_per_session` | 25 | Passed to `--max-budget-usd` |
-| `limits.max_budget_usd_total` | 150 | Stops the run when the estimate reaches it |
 
-The budget figures are Claude Code's client-side estimates, not billing data. On a
-subscription they do not represent charges, and usage limits apply instead.
+There is no budget limit. The skill is meant for Claude subscriptions, where usage limits apply
+instead, so it neither caps nor tracks estimated cost. With an API key or paid extra usage, sessions
+are billed and nothing here caps the charges.
 
 ## Usage limits
 

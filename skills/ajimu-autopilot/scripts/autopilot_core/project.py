@@ -26,8 +26,6 @@ DEFAULT_CONFIG = {
         'usage_retry_minutes': 5,
         'check_timeout_minutes': 20,
         'global_timeout_minutes': 720,
-        'max_budget_usd_per_session': 25,
-        'max_budget_usd_total': 150,
         'keep_session_logs': 40,
     },
     'preflight': {'model': 'sonnet', 'effort': 'medium'},
@@ -38,6 +36,8 @@ DEFAULT_CONFIG = {
     'docs': {'roadmap': None, 'changelog': None},
     'permissions': {'bash_allow': [], 'extra_allow': [], 'extra_deny': []},
 }
+# Written by earlier releases. Nothing reads them, and setup removes them so none looks like a working limit.
+RETIRED_LIMITS = ('max_budget_usd_per_session', 'max_budget_usd_total')
 ROADMAP_NAMES = ('ROADMAP.md', 'roadmap.md', 'docs/ROADMAP.md', 'docs/roadmap.md', 'TODO.md', 'docs/TODO.md')
 CHANGELOG_NAMES = ('CHANGELOG.md', 'docs/CHANGELOG.md', 'CHANGES.md', 'HISTORY.md')
 UNSAFE_ALLOW = re.compile(r'^\s*(?:Bash\s*(?:\(\s*\*?\s*\))?|Bash\(\s*(?:sudo|rm|git|curl|wget|ssh|scp|chmod|chown)\b.*)\s*$')
@@ -246,13 +246,15 @@ def setup(root, roadmap_path=None, branch=None, remote=None):
     """Create or complete the orchestration files; return a report of what happened.
 
     Idempotent: a second run with the same input changes nothing. Existing stories,
-    settings and progress entries are never overwritten.
+    settings and progress entries are never overwritten; only retired limits are removed.
     """
     project = Project(root)
     report = {'created': [], 'updated': [], 'imported': [], 'warnings': []}
     existed = project.config_path.is_file()
     stored = read_json(project.config_path, {}) if existed else {}
     config = merge_defaults(stored, DEFAULT_CONFIG)
+    for name in RETIRED_LIMITS:
+        config['limits'].pop(name, None)
     if branch:
         config['git']['branch'] = branch
     if remote:

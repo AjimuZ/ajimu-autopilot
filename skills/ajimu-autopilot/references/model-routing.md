@@ -76,8 +76,7 @@ output, so records hold `sent_effort`, `effort_verifiable: false` and
 ## Execution records
 
 `.ajimu-autopilot/tasks/<ID>.json` stores for each attempt: selected model and effort, the
-reason, sent effort and any note, actual models, fallback, cost estimate, permission denial
-count, check results, timestamps and result. Commit messages never mention any of this.
+reason, sent effort and any note, actual models, fallback, permission denial count, check results, timestamps and result. Commit messages never mention any of this.
 
 ## Limits of this guarantee
 

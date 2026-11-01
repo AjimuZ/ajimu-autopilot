@@ -251,14 +251,14 @@ A failed push keeps the commit and stops new work until `resume` succeeds.
 - **The session starts the runner in its background and ends its turn.** It does not poll, so it
   costs nothing while the run works, and you can keep talking to it.
 - **The run exits at the first new block or anomaly,** which wakes the session. It exits on a task
-  boundary, before paying for the next task, so the session can change the project safely.
+  boundary, before starting the next task, so the session can change the project safely.
 - **The anomalies are** a blocked task, a task failing the same way twice in a row, a session
   changing the plan, and anything that ends a run.
 - **The session fixes what it can and restarts the run,** repeating until the plan is complete or
   nothing can go on without you. What it fixes still goes through the runner's checks and review.
 
-It treats what sessions report as data, and it never marks work done, weakens a check, raises a
-budget, or forces a push. The full rules are in
+It treats what sessions report as data, and it never marks work done, weakens a check or forces a
+push. The full rules are in
 [supervision.md](skills/ajimu-autopilot/references/supervision.md), and the reasons in
 [ADR 0005](docs/decisions/0005-supervise-from-the-starting-session.md). A plain `run` from a terminal
 is unchanged: it continues past a block and exits only when nothing is left to do.
@@ -290,8 +290,7 @@ active, `pause` first: it ends after the current attempt, interrupting nothing.
 ## Monitoring
 
 `status` shows completed, remaining and blocked tasks, what needs you, the current iteration, the
-selected model and effort, check results, the last commit and push, estimated spend and recent
-errors. It reads files only, so it works during a run. Add `--json` for scripts.
+selected model and effort, check results, the last commit and push, and recent errors. It reads files only, so it works during a run. Add `--json` for scripts.
 
 A supervised run also opens a **Bash window that follows it in real time**: what the runner reports,
 and what each session says and which tools it calls.
@@ -350,9 +349,8 @@ What has actually been run, with Claude Code 2.1.314:
 - **macOS is untested,** and Linux has not run against a real model. The code uses standard POSIX
   calls and the same logic, but expect to report problems there.
 - **Some paths were only exercised with scripted sessions:** usage limits and the wait for their
-  reset, budget stops, Opus being
-  unavailable, and silent model substitution during a task. Their handling is tested, but real
-  sessions did not trigger them.
+  reset, Opus being unavailable, and silent model substitution during a task. Their handling is
+  tested, but real sessions did not trigger them.
 - **Effective effort cannot be read back,** as described above.
 - **Background model use is not fully observable.** The environment variable is the documented
   control, and it can only be spot-checked through debug logs.
@@ -366,18 +364,20 @@ What has actually been run, with Claude Code 2.1.314:
 - **The Windows `claude.cmd` shim is not supported:** `cmd.exe` mangles JSON arguments, and
   `validate` warns about it. Use the native build.
 
-## Cost and security
+## Usage and security
+
+The skill is meant for Claude subscriptions, so it sets no budget and does not track estimated cost.
+What bounds a run's consumption is the subscription's usage limits. With an API key or paid extra
+usage, sessions are billed and nothing in the skill caps the charges. The reasons are in
+[ADR 0007](docs/decisions/0007-no-budget-limits.md).
 
 Autonomous runs consume usage without supervision, and each task takes at least three sessions:
-preflight, implementation and review. Two very small tasks cost about 0.22 USD at list prices in
-testing. Real tasks cost much more, especially on Opus at high effort.
+preflight, implementation and review. Real tasks use much more on Opus at high effort.
 
-Defaults stop a run at 25 USD per session, 150 USD in total, 30 iterations, 60 minutes per session
-and 12 hours overall. Those amounts are Claude Code's estimates, not billing data, and on a
-subscription usage limits apply instead. When usage runs out, the run stays in the foreground
-and waits for the reset, however long that takes, and time spent waiting does not count against
-those 12 hours. `stop` ends the wait, and `status` shows when it should end. Keep the terminal and
-the machine on, or start again with `resume`. Details:
+Defaults stop a run at 30 iterations, 60 minutes per session and 12 hours overall. When usage runs
+out, the run stays in the foreground and waits for the reset, however long that takes, and time
+spent waiting does not count against those 12 hours. `stop` ends the wait, and `status` shows when it
+should end. Keep the terminal and the machine on, or start again with `resume`. Details:
 [safety.md](skills/ajimu-autopilot/references/safety.md).
 
 Run on a machine or container you are comfortable with, particularly for repositories you did not

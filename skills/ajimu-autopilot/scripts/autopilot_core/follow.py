@@ -46,8 +46,7 @@ def describe_event(event):
     if kind == 'system' and event.get('subtype') == 'init':
         return [f'session started on {event.get("model")}']
     if kind == 'result':
-        cost = event.get('total_cost_usd')
-        return [f'session ended: {event.get("subtype")}' + (f', {cost:.2f} USD' if isinstance(cost, (int, float)) else '')]
+        return [f'session ended: {event.get("subtype")}']
     if kind != 'assistant' or not isinstance(event.get('message'), dict):
         return []
     lines = []

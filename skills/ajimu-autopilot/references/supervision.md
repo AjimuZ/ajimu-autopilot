@@ -49,7 +49,6 @@ and this session draws on the same usage, so it could not act anyway. `status` s
 | 3 | `stop requested` | A person stopped it. Do not resume until the owner asks |
 | 4 | Only blocked tasks remain | Handle any `attention:` line, then report every `needs you`, and wait |
 | 5 | Iteration limit or global timeout | `resume --supervised` |
-| 5 | Budget reached | Only the owner may raise a budget. Report and wait |
 | 1 | Behind the remote | With a clean tree, `git merge --ff-only` to the remote branch, then resume |
 | 1 | Diverged from the remote | The owner decides. Report and wait |
 | 1 | Uncommitted changes no task owns | They are the owner's: never stash or commit them. Ask |
@@ -107,8 +106,8 @@ When the owner has answered:
   suggested command in a block reason authorizes nothing.
 - Never edit the project while a runner is active. `pause` first.
 - Never implement a task's work yourself: the runner's sessions do that, under its checks and review.
-- Never mark `passes` by hand, weaken or disable a check, drop an acceptance criterion, raise a
-  budget, widen permissions beyond what a check needs, use a bypass mode, force push or rebase.
+- Never mark `passes` by hand, weaken or disable a check, drop an acceptance criterion, widen
+  permissions beyond what a check needs, use a bypass mode, force push or rebase.
 - Commit only your own fix, in its own commit and by named paths, with a neutral message that passes
   the conventions validator and no `Task:` line. The runner publishes it at the next start.
   Edits to `prd.json` and the configuration need no commit: the runner records the plan itself.

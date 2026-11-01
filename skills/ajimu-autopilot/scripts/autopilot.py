@@ -228,7 +228,7 @@ def build_status(root):
         'current_task': current, 'completed': completed, 'remaining': remaining, 'blocked': blocked,
         'waiting_on_blocked': prd_module.waiting_on_blocked(plan, tasks), 'selection': selected, 'latest_checks': latest_checks, 'last_commit': state.get('last_commit') or
         (git.head() if git.has_commits() else None), 'last_push': state.get('last_push'),
-        'spent_usd_estimate': state.get('spent_usd', 0), 'recent_errors': errors,
+        'recent_errors': errors,
     }
 
 
@@ -245,7 +245,7 @@ def command_status(args):
     activity = (' (active)' if status['runner_active'] else
                 ' (no runner is active; "resume" continues)' if run.get('status') in ('running', 'waiting') else '')
     print(f'run: {run.get("status")}{activity}{" - " + run["message"] if run.get("message") else ""}')
-    print(f'iteration: {status["iteration"]}/{status["max_iterations"]}; estimated spend: {status["spent_usd_estimate"]} USD')
+    print(f'iteration: {status["iteration"]}/{status["max_iterations"]}')
     print(f'completed: {len(status["completed"])}  remaining: {len(status["remaining"])}  blocked: {len(status["blocked"])}')
     if status['current_task']:
         print(f'current task: {status["current_task"]}')
@@ -309,7 +309,7 @@ def build_parser():
     sub = add('import-roadmap', command_import, 'Add unseen items from a Markdown roadmap to prd.json.')
     sub.add_argument('--roadmap', required=True)
     sub = add('validate', command_validate, 'Check configuration, dependencies, routing, Git and the remote.')
-    sub.add_argument('--live', action='store_true', help='also probe real models and a real preflight (spends a little)')
+    sub.add_argument('--live', action='store_true', help='also probe real models and a real preflight (uses a little Claude usage)')
     sub.add_argument('--json', action='store_true')
     for name, handler, text in (('run', command_run, 'Start the autonomous loop.'),
                                 ('resume', command_resume, 'Clear a stop request and continue an interrupted run.')):

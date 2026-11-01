@@ -99,7 +99,7 @@ class Runner:
         earlier stage.
         """
         state = read_json(self.project.state_path) or {
-            'schema': 1, 'iteration': 0, 'spent_usd': 0.0, 'run': {'status': 'idle'}, 'current_task': None, 'tasks': {}}
+            'schema': 1, 'iteration': 0, 'run': {'status': 'idle'}, 'current_task': None, 'tasks': {}}
         plan = prd_module.load(self.project.prd_path)
         for item in plan['userStories']:
             entry = state['tasks'].setdefault(item['id'], {'status': 'pending', 'attempts': 0})
@@ -456,8 +456,8 @@ class Runner:
         """End a supervised run at this boundary when something needs its session.
 
         Nothing is in flight here and a block has already set its partial work aside, so the
-        session can change the project without racing a task, and the next task has not been
-        paid for yet. Each item is raised once: `resume` goes on without the task it named.
+        session can change the project without racing a task, and the next task has not
+        started yet. Each item is raised once: `resume` goes on without the task it named.
         """
         if self.supervised and self.attention:
             raise Halt(EXIT_PAUSED, 'supervised run paused before the next task')
@@ -469,9 +469,6 @@ class Runner:
             raise Halt(EXIT_PAUSED, 'paused after the current attempt, as requested; run "resume" to continue')
         if self.deadline and time.monotonic() > self.deadline:
             raise Halt(EXIT_LIMIT, 'global timeout reached; run "resume" to continue')
-        limit = self.config['limits'].get('max_budget_usd_total')
-        if limit and self.state.get('spent_usd', 0) >= limit:
-            raise Halt(EXIT_LIMIT, f'estimated spend reached the limit of {limit} USD')
 
     def prune_logs(self):
         keep = self.config['limits'].get('keep_session_logs', 40)
@@ -529,12 +526,10 @@ class Runner:
             log_path=str(self.project.logs_dir / f'{stamp}-{task_id}-{phase}.jsonl'), system_append=system,
             schema=preflight.load_schema(schema_name), tools=tools, allow=allow,
             deny=GIT_DENY + PATH_DENY + SHELL_DENY + tuple(self.config['permissions'].get('extra_deny', [])),
-            timeout_seconds=limits['session_timeout_minutes'] * 60, max_budget_usd=limits.get('max_budget_usd_per_session'),
+            timeout_seconds=limits['session_timeout_minutes'] * 60,
             setting_sources=self.config['claude']['setting_sources'], sonnet_id=self.sonnet_id())
         head_before, branch_before = self.git.head(), self.git.branch()
         result = claude_cli.run_session(self.command, request, self.stop_requested, self.base_env)
-        self.state['spent_usd'] = round(self.state.get('spent_usd', 0.0) + result.cost_usd, 4)
-        self.save_state()
         report = claude_cli.model_report(result, model)
         if report['forbidden']:
             message = f'{task_id} {phase}: a session used a forbidden model: {report["forbidden"]}'
@@ -554,8 +549,6 @@ class Runner:
             raise Halt(EXIT_ERROR, f'{task_id} {phase}: Claude Code authentication failed; sign in again and resume')
         if not result.has_result and result.exit_code not in (0, None) and not result.timed_out:
             self.log_error(f'{phase} exit {result.exit_code}: {result.stderr_tail}', task_id)
-        if result.subtype == 'error_max_budget_usd':
-            raise Halt(EXIT_LIMIT, f'{task_id} {phase}: the per-session budget was reached')
         return result, report
 
     def run_preflight(self, task_id):
@@ -590,8 +583,7 @@ class Runner:
                     {'at': utc_now(), 'rejected': str(error)}])[-5:]
                 self.save_record(record)
                 continue
-            accepted.update(analyzed_at=utc_now(), session_models=report['actual'], session_effort=effort,
-                            session_cost_usd=result.cost_usd)
+            accepted.update(analyzed_at=utc_now(), session_models=report['actual'], session_effort=effort)
             record['preflight'] = preflight.compact(accepted)
             record['preflight_history'] = (record['preflight_history'] + [
                 {'at': utc_now(), 'outcome': accepted['outcome'], 'task_version': accepted['analyzed_task_version']}])[-5:]
@@ -675,7 +667,7 @@ class Runner:
             self.refund_attempt(task_id, halt)
             raise
         self.restore_owned(protected, task_id)
-        execution.update(actual_models=report['actual'], fallback=report['fallback'], cost_usd=result.cost_usd,
+        execution.update(actual_models=report['actual'], fallback=report['fallback'],
                          permission_denials=len(result.permission_denials))
         output = result.structured if isinstance(result.structured, dict) else None
         problems = self.session_problems(result, output, 'implementation', ack)
@@ -715,8 +707,8 @@ class Runner:
             self.publish(task_id)
 
     def refund_attempt(self, task_id, halt):
-        """Give back an attempt ended by a stop or a limit, which says nothing about the work."""
-        if halt.code in (EXIT_PAUSED, EXIT_LIMIT):
+        """Give back an attempt ended by a stop, which says nothing about the work."""
+        if halt.code == EXIT_PAUSED:
             entry = self.entry(task_id)
             entry.update(attempts=max(entry.get('attempts', 1) - 1, 0), interrupted=True)
             self.transition(task_id, 'ready')

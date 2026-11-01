@@ -1,4 +1,4 @@
-"""Validation of a configured project, plus optional live probes that spend a few cents."""
+"""Validation of a configured project, plus optional live probes that use a little Claude usage."""
 import json
 import os
 import subprocess
@@ -63,7 +63,7 @@ def check_settings(project, report):
 
 
 def run(root, live=False, environ=None):
-    """Return a Report for one project. `live` launches real sessions and may cost money."""
+    """Return a Report for one project. `live` launches real sessions, which use Claude usage."""
     environ = os.environ if environ is None else environ
     project = project_module.Project(root)
     report = Report()
@@ -191,7 +191,7 @@ def live_probes(project, config, command, report, environ):
             request = claude_cli.SessionRequest(
                 phase='probe', model=family, effort='low', prompt='Return ack = "ok". Do nothing else.', cwd=scratch,
                 log_path=str(project.logs_dir / f'probe-{family}.jsonl'), schema=PROBE_SCHEMA, tools=(), allow=(),
-                timeout_seconds=180, max_budget_usd=1, setting_sources='project,local')
+                timeout_seconds=180, setting_sources='project,local')
             result = claude_cli.run_session(command, request, None, base)
         check = claude_cli.model_report(result, family)
         if result.transient and not check['forbidden']:
@@ -202,7 +202,7 @@ def live_probes(project, config, command, report, environ):
             continue
         healthy = result.has_result and not result.is_error and not check['forbidden'] and not check['fallback']
         report.add(f'live {family}', healthy, f'requested {family}; ran {check["actual"]}; '
-                   f'{result.subtype}; {result.cost_usd:.4f} USD; effort low was sent but cannot be read back', blocking=family == 'sonnet')
+                   f'{result.subtype}; effort low was sent but cannot be read back', blocking=family == 'sonnet')
         if healthy:
             families.append(family)
             if result.init_model:
@@ -234,7 +234,7 @@ def live_preflight(project, config, command, item, base_env):
         log_path=str(project.logs_dir / 'probe-preflight.jsonl'), system_append=preflight.load_prompt('system_rules'),
         schema=preflight.load_schema('preflight'), tools=runner_module.READ_TOOLS, allow=runner_module.READ_ALLOW,
         deny=runner_module.GIT_DENY + runner_module.PATH_DENY + runner_module.SHELL_DENY,
-        timeout_seconds=config['limits']['session_timeout_minutes'] * 60, max_budget_usd=5,
+        timeout_seconds=config['limits']['session_timeout_minutes'] * 60,
         setting_sources=config['claude']['setting_sources'])
     result = claude_cli.run_session(command, request, None, base_env)
     try:
@@ -243,7 +243,7 @@ def live_preflight(project, config, command, item, base_env):
         return False, f'{item["id"]}: {error}'
     decision = record.get('routing') or {}
     return True, (f'{item["id"]}: {record["outcome"]}; would route to {decision.get("model")}/{decision.get("effort")}; '
-                  f'ran {result.actual_models}; {result.cost_usd:.4f} USD; result not saved')
+                  f'ran {result.actual_models}; result not saved')
 
 
 def render(report):

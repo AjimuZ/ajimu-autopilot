@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.6.0 - 2026-11-01
+
+### Removed
+
+- Budget limits. The skill is meant for Claude subscriptions, so sessions no longer receive
+  `--max-budget-usd`, including `validate --live` probes, and no run stops on estimated spend. Usage
+  limits, iterations and timeouts still apply. With an API key or paid extra usage, nothing in the
+  skill caps the charges.
+- Estimated cost from `status`, including `spent_usd_estimate` in `--json`, and from `follow`,
+  `validate --live` and task records.
+
+### Changed
+
+- `limits.max_budget_usd_per_session` and `limits.max_budget_usd_total` in an existing project no longer
+  have any effect, and `setup` removes them.
+
 ## 1.5.0 - 2026-10-31
 
 ### Added

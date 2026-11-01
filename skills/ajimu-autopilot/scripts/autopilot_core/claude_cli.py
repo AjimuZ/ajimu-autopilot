@@ -53,7 +53,6 @@ class SessionRequest:
     allow: tuple = ()
     deny: tuple = ()
     timeout_seconds: int = 3600
-    max_budget_usd: object = None
     setting_sources: str = 'project,local'
     sonnet_id: str = routing.DEFAULT_SONNET_ID
 
@@ -74,7 +73,6 @@ class SessionResult:
     rate_limited: bool = False
     resets_at: object = None
     permission_denials: list = field(default_factory=list)
-    cost_usd: float = 0.0
     result_text: str = ''
     stderr_tail: str = ''
     has_result: bool = False
@@ -163,8 +161,6 @@ def build_argv(command, request, system_file=None):
     ]
     if request.effort is not None:
         argv += ['--effort', request.effort]
-    if request.max_budget_usd:
-        argv += ['--max-budget-usd', str(request.max_budget_usd)]
     if system_file:
         argv += ['--append-system-prompt-file', str(system_file)]
     if request.schema is not None:
@@ -223,7 +219,6 @@ def parse_stream(path):
             result.subtype = event.get('subtype')
             result.api_error_status = event.get('api_error_status')
             result.permission_denials = event.get('permission_denials') or []
-            result.cost_usd = float(event.get('total_cost_usd') or 0.0)
             result.result_text = event.get('result') or ''
             result.structured = event.get('structured_output')
             for name, usage in (event.get('modelUsage') or {}).items():

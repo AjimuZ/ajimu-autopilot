@@ -78,7 +78,7 @@ python "${CLAUDE_SKILL_DIR}/scripts/autopilot.py" validate
 
 If `ajimu-conventions` is missing, the output gives the official install commands. Ask
 before installing it. `validate --live` also probes real models and one real preflight;
-it costs a few cents, so offer it instead of running it unasked.
+it uses a little Claude usage, so offer it instead of running it unasked.
 
 ## 7. Report
 
@@ -101,7 +101,7 @@ python "<skill folder>/scripts/autopilot.py" stop               # stop safely
 python "<skill folder>/scripts/autopilot.py" resume             # continue
 ```
 
-Replace `<skill folder>` with the value of `${CLAUDE_SKILL_DIR}`. State the cost and
+Replace `<skill folder>` with the value of `${CLAUDE_SKILL_DIR}`. State the usage and
 safety notes from [references/safety.md](references/safety.md) before the owner starts
 a run.
 

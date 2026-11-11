@@ -2,7 +2,7 @@
 name: ajimu-autopilot
 description: Configures a software repository for autonomous, roadmap-driven development - analyses the project, turns its roadmap into verifiable Ralph tasks, and prepares a runner where every task passes a mandatory preflight, runs in a fresh Claude Code session on an automatically selected Sonnet or Opus model and effort, applies Ajimu Conventions, and is committed and pushed, on the main branch by default. Can also start that runner and stay in the session to fix what stops it. Use when the user invokes /ajimu-autopilot to set up, update, start or continue autonomous development for a project.
 disable-model-invocation: true
-argument-hint: "[roadmap path] | run | resume"
+argument-hint: "[roadmap path] | run [--ai-attribution] | resume [--ai-attribution]"
 ---
 
 # Ajimu Autopilot
@@ -115,19 +115,22 @@ a run can end. If this session runs on Haiku, stop and ask to switch with `/mode
 1. Run `status`. A project not configured yet goes through setup first. Report any task marked
    `needs you`, without waiting for an answer.
 2. Start the runner with the shell tool's background option (`run_in_background`), never in
-   the foreground. Pass on any further arguments, such as `--task ID`:
+   the foreground. Pass on any further arguments, such as `--task ID` or `--ai-attribution`:
 
    ```bash
    python "${CLAUDE_SKILL_DIR}/scripts/autopilot.py" run --supervised
    ```
+
+   `--ai-attribution` is the owner's opt-in: pass it only when they asked for it in this
+   invocation or in their words. Without it, commits carry no AI attribution.
 
    Use `resume --supervised` when `status` shows an earlier run, or when `run` refuses to start.
 3. Tell the owner the session is listening and that a read-only Bash window follows this project's
    run live, and end the turn. Do not poll: the command's end wakes this session, at the first block
    or anomaly.
 4. On waking, follow the reference. Fix what you can; `defer` what only a person can do and report
-   it; then start the runner again in the background. Repeat until the plan is complete or
-   nothing can go on without the owner.
+   it; then start the runner again in the background, with the same arguments as the first start.
+   Repeat until the plan is complete or nothing can go on without the owner.
 
 ## How the runner behaves
 

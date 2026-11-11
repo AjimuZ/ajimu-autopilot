@@ -59,6 +59,17 @@ class RunnerTests(Sandbox):
             self.assertIn(path, changed)
         self.assertFalse([path for path in changed if '.ajimu-autopilot' in path])
 
+    def test_ai_attribution_adds_co_author_trailers_only_when_asked(self):
+        self.layout = self.make_repository([self.story()])
+        self.scenario(**self.happy())
+        self.assertEqual(0, self.runner(ai_attribution=True).run())
+        message = self.git('log', '-1', '--format=%B')
+        self.assertTrue(message.rstrip().endswith('Task: T-1\nCo-Authored-By: Claude Sonnet <noreply@anthropic.com>'), message)
+        self.assertEqual('Test Owner <owner@example.invalid>', self.git('log', '-1', '--format=%an <%ae>'))
+        trailers = self.git('log', '-1', '--format=%(trailers:key=Co-Authored-By,valueonly)').strip()
+        self.assertEqual('Claude Sonnet <noreply@anthropic.com>', trailers)
+        self.assertIn('AI attribution is on', '\n'.join(self.lines))
+
     def test_each_session_is_a_new_process_with_selected_model_and_effort(self):
         self.layout = self.make_repository([self.story()])
         phases = self.happy()

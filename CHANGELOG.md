@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.7.0 - 2026-11-11
+
+### Added
+
+- `run --ai-attribution` and `resume --ai-attribution`, also as `/ajimu-autopilot run --ai-attribution`.
+  Off by default. When set, each task commit ends with a `Co-Authored-By: Claude Sonnet` or
+  `Claude Opus` trailer, `<noreply@anthropic.com>`, for each model family the session ran on. The
+  message is validated before the trailer is added; plan checkpoints stay neutral. A supervised
+  session repeats the option on each restart. See ADR 0008.
+
 ## 1.6.0 - 2026-11-01
 
 ### Removed

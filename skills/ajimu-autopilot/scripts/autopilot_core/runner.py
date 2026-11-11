@@ -69,8 +69,8 @@ class UsageLimit(Halt):
 
 
 class Runner:
-    def __init__(self, root, *, max_iterations=None, only_task=None, supervised=False, base_env=None, output=print,
-                 clock=time.time, sleep=time.sleep):
+    def __init__(self, root, *, max_iterations=None, only_task=None, supervised=False, ai_attribution=False, base_env=None,
+                 output=print, clock=time.time, sleep=time.sleep):
         self.project = project_module.Project(root)
         self.config = self.project.config()
         self.project.ensure_runtime()
@@ -78,6 +78,8 @@ class Runner:
         self.max_iterations = max_iterations or self.config['limits']['max_iterations']
         self.only_task = only_task
         self.supervised = supervised
+        # Off unless the owner asks for it on this invocation: the conventions refuse attribution by default.
+        self.ai_attribution = ai_attribution
         self.attention = []
         self.base_env = base_env
         self.print_output = output
@@ -176,6 +178,8 @@ class Runner:
             return EXIT_USAGE
         with RunnerLock(self.project.lock_path):
             self.append_run_log('--- run started ---')
+            if self.ai_attribution:
+                self.output('AI attribution is on: task commits name the Claude models that wrote them')
             # Only a supervised run: its output goes to a background task nobody can watch, while
             # a run in a terminal already shows it and may have no desktop to open a window on.
             problem = follow.open_window(self.project) if self.supervised else None
@@ -697,6 +701,7 @@ class Runner:
         if not accepted:
             self.fail_attempt(task_id, record, execution, [f'commit message rejected: {detail}'])
             return
+        message = self.attributed(message, report['actual'] or [model])
         execution.update(status='verified', ended_at=utc_now(), result='passed')
         record['executions'].append(execution)
         self.save_record(record)
@@ -872,6 +877,14 @@ class Runner:
             parts.append(body.strip())
         parts.append(f'Task: {task_id}')
         return '\n\n'.join(parts) + '\n'
+
+    def attributed(self, message, models):
+        """Return `message` with co-author trailers for `models` when this run attributes commits.
+
+        Called only after the validator accepted the neutral message, so the subject and body are
+        still held to every other rule. Without the opt-in the message is returned unchanged.
+        """
+        return conventions.with_co_authors(message, models) if self.ai_attribution else message
 
     def check_message(self, message):
         path = self.project.runtime_dir / 'COMMIT_MSG'

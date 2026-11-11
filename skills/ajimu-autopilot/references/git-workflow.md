@@ -25,7 +25,9 @@ commits on it go out too, at the start of the run.
 2. Session implements. The runner checks that the branch and `HEAD` did not move.
 3. Run checks, scan the change, tick the roadmap, run the review.
 4. Validate the message: subject, optional body, and an exact `Task: <ID>` line. An ID the
-   validator refuses blocks the task before any session runs, and `validate` names it.
+   validator refuses blocks the task before any session runs, and `validate` names it. With
+   `--ai-attribution`, `Co-Authored-By` trailers naming the models that ran are appended after
+   the validation, below the `Task:` line.
 5. Set `passes`, write progress, `git add --all` (honoring `.gitignore`), refuse sensitive
    paths, and commit with hooks active.
 6. `git push --set-upstream origin <branch>`, then confirm with `git ls-remote` that the

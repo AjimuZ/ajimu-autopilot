@@ -77,7 +77,7 @@ def _run(args, resume):
             raise LockHeld(lock.owner())
         runner_module.clear_stop(args.project)
     worker = runner_module.Runner(args.project, max_iterations=args.max_iterations, only_task=args.task,
-                                  supervised=args.supervised)
+                                  supervised=args.supervised, ai_attribution=args.ai_attribution)
     return worker.run()
 
 
@@ -318,6 +318,8 @@ def build_parser():
         sub.add_argument('--task', help='work only on this task')
         sub.add_argument('--supervised', action='store_true',
                          help='end the run at the first block or anomaly, for the session that started it to act on')
+        sub.add_argument('--ai-attribution', action='store_true',
+                         help='add a Co-Authored-By trailer naming the Claude models to each task commit (off by default)')
     add('stop', command_stop, 'Ask the active runner to stop safely.')
     add('pause', command_pause, 'Ask the active runner to end after its current attempt, interrupting nothing.')
     sub = add('status', command_status, 'Show tasks, iteration, selection, checks, commit, push and errors.')

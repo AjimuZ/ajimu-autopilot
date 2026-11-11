@@ -77,6 +77,13 @@ confirms the check commands and validates the result. The roadmap path is option
 The session starts the runner in its background and stays with it. See
 [Supervised runs](#supervised-runs). Later, `/ajimu-autopilot resume` continues.
 
+Commits are neutral by default. To credit the models that wrote each task, ask for it when you
+start, and the session keeps the option on every restart:
+
+```text
+/ajimu-autopilot run --ai-attribution
+```
+
 ### Or run it unattended, in any terminal
 
 Use these from the project folder. The `$HOME` form works in Bash, Zsh and PowerShell; use
@@ -98,8 +105,8 @@ python "$HOME/.claude/skills/ajimu-autopilot/scripts/autopilot.py" resume       
 | `setup [--roadmap P] [--branch B] [--remote R] [--json]` | Create or complete the project files |
 | `import-roadmap --roadmap P` | Add unseen roadmap items to the plan |
 | `validate [--live] [--json]` | Check configuration, plan, routing, skills, Git and remote |
-| `run [--max-iterations N] [--task ID] [--supervised]` | Start the loop; the iteration limit applies to each run |
-| `resume [--max-iterations N] [--task ID] [--supervised]` | Clear a stop request and continue |
+| `run [--max-iterations N] [--task ID] [--supervised] [--ai-attribution]` | Start the loop; the iteration limit applies to each run |
+| `resume [--max-iterations N] [--task ID] [--supervised] [--ai-attribution]` | Clear a stop request and continue |
 | `stop` | End the current session or check safely and save state |
 | `pause` | End the run after the current attempt, interrupting nothing |
 | `status [--json]` | Tasks, iteration, selection, checks, last commit and push, errors, what needs you |
@@ -151,7 +158,8 @@ Each implementation and review session receives the installed skill's rules in i
 prompt and must echo a per-session token, or the attempt fails. The runner also applies the
 official `check_commit_message.py` to each commit, ticks the roadmap only after its own checks
 pass, requires a changelog entry for user-visible changes, and writes progress and metadata from
-observed results. Commit messages stay neutral, with no tool references or co-author trailers.
+observed results. Commit messages stay neutral, with no tool references or co-author trailers,
+unless you start with `--ai-attribution`: see [Commit and push](#commit-and-push).
 
 ## Task Preflight
 
@@ -243,6 +251,13 @@ refused, and `validate` warns if the working branch does not exist yet, as in a 
 main line is called `master`.
 
 A failed push keeps the commit and stops new work until `resume` succeeds.
+
+**AI attribution is opt-in.** `run --ai-attribution` and `resume --ai-attribution` append a
+`Co-Authored-By` trailer for each model family that wrote the task, such as
+`Co-Authored-By: Claude Opus <noreply@anthropic.com>`, after the `Task:` line. The message is
+validated before the trailer is added, and you stay the author. Plan checkpoints stay neutral, and
+the option lasts only for the invocation that names it. A `commit-msg` hook running the conventions
+validator refuses these commits.
 
 ## Supervised runs
 

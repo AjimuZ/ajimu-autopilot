@@ -159,6 +159,18 @@ class ConventionsTests(unittest.TestCase):
             path.write_text('Keep drafts\n\nCo-Authored-By: A <a@example.invalid>\n', encoding='utf-8')
             self.assertFalse(conventions.check_message(found, path)[0])
 
+    def test_co_author_trailers_name_each_family_used(self):
+        line = 'Co-Authored-By: Claude {} <noreply@anthropic.com>'
+        self.assertEqual([line.format('Sonnet'), line.format('Opus')],
+                         conventions.co_author_trailers(['claude-opus-5-5', 'claude-sonnet-5-5', 'opus']))
+        self.assertEqual(['Co-Authored-By: Claude <noreply@anthropic.com>'],
+                         conventions.co_author_trailers(['claude-haiku-5-5', 'unknown']))
+        self.assertEqual('Keep drafts\n\nTask: T-1\n' + line.format('Opus') + '\n',
+                         conventions.with_co_authors('Keep drafts\n\nTask: T-1\n', ['opus']))
+        self.assertEqual('Keep drafts\n\n' + line.format('Opus') + '\n', conventions.with_co_authors('Keep drafts\n', ['opus']))
+        self.assertEqual('Keep drafts\n\nBecause: the body is prose.\nIt has two lines.\n\n' + line.format('Opus') + '\n',
+                         conventions.with_co_authors('Keep drafts\n\nBecause: the body is prose.\nIt has two lines.\n', ['opus']))
+
     @unittest.skipUnless(conventions.locate(), 'ajimu-conventions is not installed')
     def test_task_ids_the_validator_refuses_are_named(self):
         found = conventions.locate()

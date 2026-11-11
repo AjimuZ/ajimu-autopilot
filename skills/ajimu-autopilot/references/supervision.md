@@ -32,6 +32,8 @@ what only a person can do so that the rest can go on.
    a fault: go by the table.
 4. Act as below, and tell the owner in one or two lines what happened and what you did.
 5. Start the runner again in the background with `resume --supervised`, unless the table says not to.
+   Keep every option of the first start, such as `--ai-attribution` or `--task ID`: a restart that
+   drops `--ai-attribution` commits the next tasks without the trailer.
 
 A usage limit does not end the run or wake the session: the runner waits for the reset by itself,
 and this session draws on the same usage, so it could not act anyway. `status` shows the wait.
